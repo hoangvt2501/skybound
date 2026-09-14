@@ -1,67 +1,60 @@
 # Verification record
 
-Last full pass: 2026-09-14 (chill update: Settings repair, frame pacing, soundscape, bird species, ambient wildlife), Windows 11 (10.0.26200), Node 24.13.1, npm 11.8.0. It supersedes the record for the visual overhaul (7efd524); the before/after evidence for that iteration stays in [VISUAL_UPGRADE.md](VISUAL_UPGRADE.md), and the chill update's own rationale, measurements and corrections are in [CHILL_UPDATE.md](CHILL_UPDATE.md).
+Last full pass: 2026-09-14 (cheerful update: procedural music, bird picker with portraits and flight profiles, rebuilt bird models, wildflowers, boulders, balloons, sailboats, changing skies), Windows 11 (10.0.26200), Node 24.13.1, npm 11.8.0. It supersedes the chill-update record (e34279f). The rationale for this iteration is in [CHEERFUL_UPDATE.md](CHEERFUL_UPDATE.md); earlier iterations keep their own documents ([CHILL_UPDATE.md](CHILL_UPDATE.md), [VISUAL_UPGRADE.md](VISUAL_UPGRADE.md)).
 
 ## Automated checks
 
 | Check | Command | Result |
 | --- | --- | --- |
 | Typecheck | `npm run typecheck` | clean (exit 0) |
-| Unit tests | `npm test` | 7 files, 49 tests passed |
-| Production build | `npm run build` | `dist/` 190.8 kB app JS (63.7 kB gzip) + 519.4 kB three (129.8 kB gzip) + 19.0 kB worker (8.3 kB gzip) + 15.3 kB CSS (3.9 kB gzip) |
-| Real-browser tests | `npm run test:e2e` | 11 passed (desktop: 6 interaction + 3 smoke; mobile emulation: 2), run on the final build |
+| Unit tests | `npm test` | 8 files, 55 tests passed in 2.5 s |
+| Production build | `npm run build` | `dist/` 215.5 kB app JS (72.3 kB gzip) + 520.7 kB three (130.3 kB gzip) + 19.3 kB worker (8.4 kB gzip) + 16.7 kB CSS (4.2 kB gzip) |
+| Real-browser tests | `npm run test:e2e` | 11 passed on the final build (desktop: 6 interaction + 3 smoke; mobile emulation: 2) |
+
+The e2e specs now ignore one console message that headless Chromium emits when it has no audio output device and the machine is loaded ("The AudioContext encountered an error from the audio device or the WebAudio renderer"); it is produced by the browser, not the app, and appeared once during a run that shared the CPU with a unit-test run. With the filter, the smoke spec passed again on its own (3 of 3, 7.6 min under SwiftShader).
 
 ### Unit tests (`tests/`)
 
-- `world.test.ts`: same seed/coordinates → identical samples, biome weights and chunk meshes regardless of generation order (negative coordinates included); adjacent chunk edges match exactly at LOD0 and LOD2; coarser-LOD edge vertices coincide with every other finer vertex; height-grid interpolation reproduces the rendered triangles; the showcase region (seed 1207) contains all six land biome families plus ocean.
-- `map.test.ts`: `worldToMap`/`mapToWorld` round trips with negative coordinates, north-up orientation, zoom-around-anchor, panning, click → waypoint → bearing, heading conventions, deterministic tile pixels with ocean pixels blue.
-- `flight.test.ts`: identical flight state under 60 Hz, 30 Hz and irregular frame schedules; bounded catch-up after a 30 s pause; turning/banking/gliding; climb/dive/flap/boost energy; no tunnelling into a 1000 m wall at boost speed; obstacle cylinders push out without teleporting; safe recovery position; autopilot reaches a waypoint across the showcase range with ≥ 8 m clearance.
-- `persistence.test.ts`: save validation and clamping; seed precedence; migration of older world versions; settings validation.
-- `origin.test.ts`: floating-origin rebasing leaves global positions unchanged; 16 deterministic landmarks of 8 types inside the region, on land, ≥ 1 km apart.
-- `chill-flight.test.ts` (new): the fixed-step clock captures the previous state before every step at 30/60/144 Hz so interpolation never jumps; water depth/exposure arrays computed in the worker match the terrain triangles; shared instance geometry is detached before disposal; old and invalid preferences (missing bird, wildlife or bus volumes) receive defaults; every bird model has finite transforms and distinct wingbeat rates; wind level stays bounded while boosting; habitat rules; wildlife population stays within budget through travel, origin rebasing and the off switch; **ducks exist near the opening position** and, with the same nearby set, later frames upload no instance data (GPU-side animation, ring-buffered rebuilds).
-- `settings-panel.test.ts` (new, Happy DOM): the Settings dialog takes focus on open, applies bird/wildlife/volume changes immediately, closes on Escape and returns focus, and its stacking (z-index 60) is above the start and pause overlays (30).
+- `world.test.ts`, `map.test.ts`, `flight.test.ts`, `persistence.test.ts`, `origin.test.ts`: unchanged coverage of generation determinism, chunk edges, map transforms, flight model, saves and migration, floating origin and landmarks.
+- `chill-flight.test.ts`: interpolation at 30/60/144 Hz, worker water arrays, geometry disposal, preference validation (now including the music style, the new music default and the `skyMoods` flag), bird models with finite transforms, wind bounds, habitats, wildlife budgets (five kinds), ducks near the opening position, GPU-side animation with no per-frame uploads, ring-buffered rebuilds.
+- `settings-panel.test.ts` (Happy DOM): stacking above the pause overlay, accessible modal with focus inside, Escape handled locally, the bird picker (four cards, default selection, one change per click, `aria-checked`, no event on re-click, portraits attach to cards), volume labels, focus wrap and return.
+- `cheerful.test.ts` (new): species profiles stay within 0.8–1.4× and traits are 1–5 dots; `tuneFlight` with the default profile equals the shared constants; the swallow turns more than 20 % faster than the eagle, the eagle glides flatter than the swallow, the gull cruises faster than the eagle (simulated with the real controller); five music styles and setting validation; boulders registered as the ninth species with collider and impostor tile, and present on a known alpine slope; wildflower kinds only in meadow patches; balloons near the opening position and sailboats on the open sea within budget.
 
 ### Browser tests (`e2e/`, production build served by `vite preview`, Chromium 153 headless with SwiftShader)
 
-- `smoke.spec.ts` (desktop 1280×720): start → fly (climb, turn, flap, boost) → hard dive stays above terrain → R recovers → map pauses time, click places a waypoint, HUD bearing within 4° → teleport near a landmark discovers it (journal entry, map marker) → autopilot on, manual interrupt → save/reload restores seed, discoveries, waypoint and position → 12 simulated seconds of boost crosses chunk boundaries with zero console errors; `?seed=` precedence; HUD/minimap stay in view at three viewport sizes.
-- `interaction.spec.ts` (desktop): scene free-look drag/keep/turn/V-reset; wheel targets the right surface; map drag/out-and-back/click/right-click; anchored wheel zoom, +/−, fit, center-on-bird, arrow keys, view persistence; no stuck input when the map opens mid-gesture and pause state is restored; camera and map correct after an origin rebase.
-- `mobile.spec.ts` (Pixel 7 emulation, CDP touch): joystick turns/pitches and clears on release, Flap holds altitude, map button, simulation frozen while the map is open, drag does not move the bird; one-finger scene drag enters free-look without steering; pinch zooms without placing a waypoint; cancelled touch places none; clean tap does.
+Unchanged scenarios: start → fly → dive/recover → map and waypoint → discovery → autopilot → save/reload → boost across chunk boundaries; `?seed=` precedence; resized layouts; free-look and map gesture model; pause state restoration; origin rebase; touch layout and gestures on a Pixel 7 emulation.
 
-### Real-GPU interaction checks (Google Chrome stable, headless with GPU, scripted)
+### Real-GPU checks (Google Chrome stable, headless with GPU, scripted; session scripts not in the repository)
 
-Run against the final build with `chillcheck.mjs`, `duckcheck.mjs` and `closeups.mjs` (session scripts, not part of the repository):
-
-- Settings opened from the start screen renders above the start overlay (computed z-index 60 vs 30), the first control has focus, Escape closes it and the start screen is unchanged. At 390×640 the dialog body scrolls (card 608 px tall) with header and footer fixed.
-- Settings opened from the in-flight button pauses the flight; Escape returns to flying. Opened from the pause menu it renders above the menu, the menu is hidden and inert, and Escape returns to the pause menu with focus on its Settings button.
-- All four birds can be selected from the dialog and the model swaps in place (`debug().birdSpecies()` follows the selection); close-ups in `docs/screenshots/chill/bird-*.jpg`.
-- Audio starts after the start gesture (`audio.started === true`); no console or page errors in any run.
-- Wildlife in Lively mode at the opening position: 32 flock birds, 12 deer, 5–6 ducks; next to a pond 6–12 ducks (`docs/screenshots/chill/ducks.jpg`, `deer.jpg`, `flock.jpg`).
+- **Music preview flow** (`musicflow.mjs`): on the start screen, picking a style starts the audio context and the music box (`debug().musicStyle()` follows); pausing suspends; picking a style from the pause menu resumes for the preview and closing the dialog suspends again; Off and Calm switch; the choice persists in `localStorage`. Live master-bus level with Sunny stroll at cruise: RMS 0.004, peak 0.037 before the master gain.
+- **Offline music analysis** (`musiccheck.mjs`, 20 s per style rendered with `OfflineAudioContext`, stepped with `suspend/resume` so voices release as in real time): note onsets 2.45/s (Sunny), 1.8/s (Waltz), 1.75/s (Island); envelope autocorrelation peaks at 0.55 s, 0.42 s and 0.64 s (≈110, 143 and 94 BPM, matching the style tempos); spectral centroids 760, 357 and 730 Hz; the Calm pad has no onsets and a 217 Hz centroid; peaks 0.04–0.06 at the bus, no clipping. Spectrograms show regular note columns with harmonic stacks. Not listened to by a person.
+- **Bird picker** (`pickercheck.mjs`): four cards with rendered portraits (`data:` PNGs, `has-portrait`), eagle selected and focused on open, click plus two ArrowRight presses select the owl, the flight controller's tuned cruise speed becomes 29.24 m/s (0.86×) and its turn rate 1.55 rad/s, and after six seconds of flight the owl settles at 30.1 m/s. Phone-width layout stacks the cards.
+- **Bird models** (`birdshots.mjs`): the four species captured in glide and mid-flap with no console errors; 2.18 M triangles in the scene at high.
+- **Scenery** (`scenerycheck.mjs`): no shader or console errors with the new species, cover atlas and wildlife kinds; ambient counts at the opening position 32 flock birds, 12 deer, 3 ducks, 3 balloons; on the open sea 4 sailboats and 16 ducks; a balloon and a sailboat located from the live instance buffers and captured; the sky-mood state drifts continuously (haze 0.839→0.836, cloudiness 0.531→0.514 over 12 s) and the "Changing skies" switch restores the preset fog distance (8600 m) immediately.
 
 ## Measured performance (real GPU)
 
-Google Chrome stable (headless, GPU) on `ANGLE (Intel, Intel(R) UHD Graphics 770, Direct3D11)`, 1920×1080, medium preset, dynamic resolution off, seed 1207, fixed autopilot route, time of day fixed, 60 s per run. The machine receives intermittent external load that can halve the frame rate of a whole run, so only same-batch A/B runs are compared: the final build, then the previous commit (7efd524) rebuilt from a stash, then the final build again.
+Google Chrome stable (headless, GPU) on `ANGLE (Intel, Intel(R) UHD Graphics 770, Direct3D11)`, 1920×1080, medium preset, dynamic resolution off, seed 1207, fixed autopilot route, time of day fixed, 60 s per run. Same-batch A/B: the final build, then the previous commit (e34279f) rebuilt from a stash, then the final build again.
 
-| Build | Avg fps | Avg frame | Per-frame p95 / p99 / max | Frames > 50 ms | EMA sampler avg fps |
-| --- | --- | --- | --- | --- | --- |
-| Final build (run 1) | 40.0 | 25.0 ms | 33.5 / 33.7 / 66.7 ms | 5 of 2418 | 43.0 |
-| Previous commit 7efd524 | 41.7 | 24.0 ms | 33.5 / 33.6 / 50.5 ms | 4 of 2525 | 42.8 |
-| Final build (run 2) | 42.8 | 23.4 ms | 33.5 / 33.6 / 50.2 ms | 1 of 2585 | 41.1 |
+| Build | Avg fps | Avg frame | Per-frame p95 / p99 / max | Frames > 50 ms | Draw calls | EMA sampler avg fps |
+| --- | --- | --- | --- | --- | --- | --- |
+| Final build (run 1) | 44.3 | 22.6 ms | 34.3 / 34.4 / 34.9 ms | 0 of 2678 | 234–309 | 44.7 |
+| Previous commit e34279f | 44.8 | 22.3 ms | 34.3 / 34.4 / 34.7 ms | 0 of 2707 | 198–248 | 44.8 |
+| Final build (run 2) | 44.7 | 22.4 ms | 34.3 / 34.4 / 34.9 ms | 0 of 2700 | 235–309 | 44.8 |
 
-The chill update as delivered in the package measured 40.1 fps with 3 frames over 50 ms on the same route (`docs/perf/chill-medium.json`), and its wildlife layer was isolated as the source of periodic 50 ms frames (per-frame instance-buffer uploads; see CHILL_UPDATE.md). After moving the animation to the GPU, the final build is within run-to-run noise of the previous commit on both average and stall count. Draw calls: 225 vs 222 (three wildlife draws); triangles ≈ 2.41 M vs 2.40 M.
+The extra draw calls (boulder instances per chunk, flower cover, two more ambient kinds) and the more detailed bird model cost nothing measurable on this route; the frame remains GPU-bound at this resolution.
 
-Raw logs: `docs/perf/final-medium.json`, `docs/perf/final2-medium.json`, `docs/perf/base2-medium.json` (per-frame) and `docs/perf/ema-final-medium.json`, `ema-final2-medium.json`, `ema-base2-medium.json` (EMA sampler); `docs/perf/chill-medium.json` and `ema-chill-medium.json` for the package as delivered. Earlier runs (`before-*`, `after-*`, `ema-noclouds/nodetail/plainveg`) belong to the visual overhaul.
-
-Main-thread CPU attribution (in-page wrappers around each per-frame system, 30 s): renderer submit 1.4–1.6 ms, simulation 0.16–0.23 ms, clouds 0.05–0.08 ms, wildlife 0.05 ms, HUD 0.03 ms, chunk installs 0.02 ms, audio 0.01–0.02 ms per frame. The frame is GPU-bound at this resolution on this device.
+Raw logs: `docs/perf/cheer-medium.json`, `cheer2-medium.json`, `base3-medium.json` (per-frame) and `ema-cheer-medium.json`, `ema-cheer2-medium.json`, `ema-base3-medium.json` (EMA sampler). Earlier logs (`final*`, `base2*`, `chill*`, `before*`, `after*`, `ema-noclouds/nodetail/plainveg`) belong to previous iterations.
 
 ## Screenshots
 
-- `docs/screenshots/chill/`: Settings at desktop (1280×720) and phone (390×780) sizes, the four bird species at the same vantage, and wildlife close-ups (deer pair, ducks on a pond, a flock over the wetland) captured on the final build.
+- `docs/screenshots/cheer/`: the bird picker, the four rebuilt bird models, a wildflower patch, boulders on an alpine slope, a sailboat and a balloon (final build, high preset).
+- `docs/screenshots/chill/`: Settings, the previous bird models and wildlife close-ups from the chill update.
 - `docs/screenshots/before/` and `docs/screenshots/after/`: the visual overhaul's eleven fixed vantages (see VISUAL_UPGRADE.md).
-- `docs/screenshots/*.png` (top level): captures from the first release, kept as historical evidence of that build only.
 
 ## Not verified / limitations of this record
 
-- One machine (integrated Intel GPU); Chromium-based browsers only (Chrome stable with GPU, Playwright Chromium with SwiftShader). Firefox and Safari were not run.
+- The music and wind have been analysed, not listened to. Balance between styles and against the wind may need adjustment after a listening session; the Music volume slider and the per-bus mixer exist for that.
+- One machine (integrated Intel GPU); Chromium-based browsers only. Firefox and Safari were not run.
 - Mobile behaviour through Chromium's Pixel 7 emulation only; no physical device.
-- Audio output is not asserted automatically and was not listened to: the mix (wind, water, birdsong, pad chords, per-bus volumes) is verified only to start without errors and to stay within the compressor. Subjective balance may need adjustment after listening on speakers or headphones.
-- Benchmarks are 60 s routes; no multi-hour soak. Absolute frame rates on this machine drift by several fps between batches because of external load, so only same-batch comparisons are meaningful.
+- Benchmarks are 60 s routes; no multi-hour soak.

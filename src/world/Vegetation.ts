@@ -498,7 +498,44 @@ function willow(seed: number): THREE.BufferGeometry {
   return merge(parts);
 }
 
-const BUILDERS: ((seed: number) => THREE.BufferGeometry)[] = [oak, pine, birch, palm, cactus, deadwood, shrub, willow];
+/** Boulder: a couple of displaced icospheres, flattened, grey with a lichen tint and a lighter sun-side top. */
+function boulder(seed: number): THREE.BufferGeometry {
+  const rng = new Rng(seed);
+  const parts: THREE.BufferGeometry[] = [];
+  const n = 1 + rng.int(3);
+  const greys = ['#8a8680', '#7d7a74', '#948f86', '#86827a'];
+  for (let i = 0; i < n; i++) {
+    const r = (i === 0 ? 1.6 : 0.9) + rng.next() * 1.1;
+    const g = new THREE.IcosahedronGeometry(r, 1);
+    const pos = g.attributes.position;
+    for (let k = 0; k < pos.count; k++) {
+      const x = pos.getX(k), y = pos.getY(k), z = pos.getZ(k);
+      const bump = 1 + (rng.next() - 0.5) * 0.28;
+      pos.setXYZ(k, x * bump * 1.15, Math.max(y * bump * 0.72, -r * 0.35), z * bump);
+    }
+    pos.needsUpdate = true;
+    g.deleteAttribute('uv'); g.deleteAttribute('normal');
+    const merged = mergeVertices(g); merged.computeVertexNormals();
+    const base = greys[rng.int(greys.length)];
+    paintCrown(merged, base, '#5f5d58', rng, 0.05);
+    // Lichen and a lighter top.
+    const col = merged.attributes.color, nrm = merged.attributes.normal, c = new THREE.Color(), lichen = new THREE.Color('#9aa46a');
+    for (let k = 0; k < col.count; k++) {
+      c.setRGB(col.getX(k), col.getY(k), col.getZ(k));
+      const up = Math.max(0, nrm.getY(k));
+      c.lerp(new THREE.Color('#b0aca4'), up * 0.25);
+      if (rng.next() < 0.18) c.lerp(lichen, 0.35);
+      col.setXYZ(k, c.r, c.g, c.b);
+    }
+    tag(merged, 0, 0.1);
+    const a = rng.next() * Math.PI * 2, d = i === 0 ? 0 : 1.2 + rng.next() * 1.2;
+    place(merged, Math.cos(a) * d, r * 0.55 - 0.2, Math.sin(a) * d, 0, rng.next() * Math.PI * 2, 0);
+    parts.push(merged);
+  }
+  return merge(parts);
+}
+
+const BUILDERS: ((seed: number) => THREE.BufferGeometry)[] = [oak, pine, birch, palm, cactus, deadwood, shrub, willow, boulder];
 
 /** Build one species geometry (pure; no DOM). Exported for tests and tools. */
 export function buildTreeGeometry(species: Species, seed: number): THREE.BufferGeometry {
@@ -509,12 +546,12 @@ export function buildTreeGeometry(species: Species, seed: number): THREE.BufferG
 // Impostor atlas & ground cover textures (procedural canvas)
 // ---------------------------------------------------------------------------
 
-export const IMPOSTOR_TILES = 8;
+export const IMPOSTOR_TILES = 9;
 const TILE_W = 128, TILE_H = 192;
 
 /** Visual size (m) of a unit-scale impostor per species: [width, height]. */
 export const IMPOSTOR_SIZE: [number, number][] = [
-  [9, 12], [6.5, 15], [5.5, 11], [7, 10], [2.2, 4.5], [4, 6], [3, 2.2], [7.5, 8],
+  [9, 12], [6.5, 15], [5.5, 11], [7, 10], [2.2, 4.5], [4, 6], [3, 2.2], [7.5, 8], [5.5, 3.6],
 ];
 
 function paintImpostorAtlas(): THREE.CanvasTexture {
@@ -580,6 +617,9 @@ function paintImpostorAtlas(): THREE.CanvasTexture {
       case Species.Shrub:
         blob(cx, 150, 34, '#5d7d34', 10); blob(cx - 20, 160, 22, '#6d8a3a'); blob(cx + 20, 158, 22, '#557530');
         break;
+      case Species.Rock:
+        blob(cx, 150, 40, '#87837c', 7); blob(cx - 26, 166, 20, '#7a766f', 5); blob(cx + 30, 170, 16, '#94908a', 5); blob(cx - 4, 132, 22, '#a3a09a', 4);
+        break;
       case Species.Willow:
         trunkRect(cx, 12, 120, 192, '#5a4030');
         blob(cx, 88, 40, '#86ad52'); ctx.strokeStyle = '#7fa64d'; ctx.lineWidth = 5;
@@ -596,19 +636,24 @@ function paintImpostorAtlas(): THREE.CanvasTexture {
   return tex;
 }
 
+export const COVER_TILES = 7;
+
 function paintGrassAtlas(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  const tiles = 4;
+  const tiles = COVER_TILES;
   canvas.width = 64 * tiles;
   canvas.height = 64;
   const ctx = canvas.getContext('2d')!;
   const rng = new Rng(0x9a55);
-  const palettes = [['#6f9a3a', '#88b048'], ['#7ea24a', '#a7c25a'], ['#8f9a4a', '#b3ad5c'], ['#5f8a3a', '#7aa346']];
+  const palettes = [['#6f9a3a', '#88b048'], ['#7ea24a', '#a7c25a'], ['#8f9a4a', '#b3ad5c'], ['#5f8a3a', '#7aa346'], ['#5f8f3a', '#7aa346'], ['#6a9440', '#86ad4c'], ['#5c8a3c', '#78a548']];
+  // Flower tiles: stalks first, then blossoms on top.
+  const flowers: (null | { petals: string; center: string; count: number; spike?: boolean })[] = [null, null, null, null,
+    { petals: '#e6452f', center: '#2a1a12', count: 9 }, { petals: '#f7f3e6', center: '#f2c230', count: 10 }, { petals: '#7d5fc4', center: '#5b3fa8', count: 8, spike: true }];
   for (let t = 0; t < tiles; t++) {
     ctx.save();
     ctx.translate(t * 64, 0);
     ctx.lineCap = 'round';
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < (flowers[t] ? 9 : 14); i++) {
       ctx.strokeStyle = palettes[t][i % 2];
       ctx.lineWidth = 2 + rng.next() * 2;
       const x0 = 12 + rng.next() * 40;
@@ -617,6 +662,20 @@ function paintGrassAtlas(): THREE.CanvasTexture {
       ctx.moveTo(x0, 64);
       ctx.quadraticCurveTo(x0 + (rng.next() - 0.5) * 16, 64 - h * 0.6, x0 + (rng.next() - 0.5) * 30, 64 - h);
       ctx.stroke();
+    }
+    const flower = flowers[t];
+    if (flower) {
+      for (let i = 0; i < flower.count; i++) {
+        const x = 8 + rng.next() * 48, y = flower.spike ? 6 + rng.next() * 26 : 10 + rng.next() * 30, r = flower.spike ? 3 : 4.6 + rng.next() * 2.2;
+        if (flower.spike) { // lupine: a column of small blossoms
+          ctx.fillStyle = flower.petals;
+          for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.arc(x + (k % 2 ? 2 : -2), y + k * 4.5, r, 0, Math.PI * 2); ctx.fill(); }
+        } else {
+          ctx.fillStyle = flower.petals;
+          for (let k = 0; k < 5; k++) { const a = (k / 5) * Math.PI * 2; ctx.beginPath(); ctx.arc(x + Math.cos(a) * r * 0.9, y + Math.sin(a) * r * 0.9, r * 0.7, 0, Math.PI * 2); ctx.fill(); }
+          ctx.fillStyle = flower.center; ctx.beginPath(); ctx.arc(x, y, r * 0.45, 0, Math.PI * 2); ctx.fill();
+        }
+      }
     }
     ctx.restore();
   }
@@ -654,9 +713,9 @@ export class VegetationLibrary {
 
   constructor() {
     this.material = new VegetationMaterial();
-    const builders: ((seed: number) => THREE.BufferGeometry)[] = [oak, pine, birch, palm, cactus, deadwood, shrub, willow];
+    const builders = BUILDERS;
     // Geometry variants per species (shader adds per-instance variation on top).
-    const variantCounts = [2, 2, 1, 1, 1, 1, 1, 1];
+    const variantCounts = [2, 2, 1, 1, 1, 1, 1, 1, 2];
     for (let s = 0; s < SPECIES_COUNT; s++) {
       this.geometries[s] = [];
       for (let v = 0; v < variantCounts[s]; v++) this.geometries[s].push(builders[s](hash2(s, v, 0x7e9)));
@@ -665,7 +724,7 @@ export class VegetationLibrary {
     this.impostorMaterial = new BillboardMaterial(this.impostorTexture, IMPOSTOR_TILES, 100000, 100001, 0);
     this.impostorGeometry = crossQuads();
     this.grassTexture = paintGrassAtlas();
-    this.coverMaterial = new BillboardMaterial(this.grassTexture, 4, 110, 170, 0.12);
+    this.coverMaterial = new BillboardMaterial(this.grassTexture, COVER_TILES, 110, 170, 0.12);
     this.coverGeometry = crossQuads();
   }
 

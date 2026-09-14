@@ -13,6 +13,7 @@ import { Autopilot } from '../flight/Autopilot';
 import { BIRD_SPECIES } from '../flight/BirdSpecies';
 import { Wildlife } from '../world/Wildlife';
 import { BirdModel } from '../flight/Bird';
+import { renderBirdPortraits } from '../ui/BirdPortraits';
 import { CameraRig } from '../flight/CameraRig';
 import { createFlightState, copyFlightState, emptyInput, FlightController, type FlightInput, type FlightState, type TerrainQuery, findSafeAirborne } from '../flight/FlightController';
 import { InputManager } from '../flight/Input';
@@ -54,6 +55,7 @@ type Phase = 'loading' | 'start' | 'flying' | 'paused';
 
 const _v = new THREE.Vector3();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _hazeTint = new THREE.Color();
 
 export class App {
   readonly renderer: THREE.WebGLRenderer;
@@ -170,6 +172,7 @@ export class App {
       },
     };
     this.flight = new FlightController(terrain);
+    this.flight.setProfile(BIRD_SPECIES[this.settings.birdSpecies].profile);
     this.autopilot = new Autopilot(terrain, (opts.seed % 1000) / 100);
     this.flight.onImpact = (speed, kind) => this.onImpact(speed, kind);
 
@@ -376,6 +379,7 @@ export class App {
     this.audio.setMix(this.settings);
     this.audio.setVolume(this.settings.volume);
     this.audio.setMuted(this.settings.muted);
+    this.audio.setMusicStyle(this.settings.musicStyle);
     this.audio.start();
     this.audio.setVolume(this.settings.volume);
     this.audio.setMuted(this.settings.muted);
@@ -541,6 +545,26 @@ export class App {
     this.hemi.color.copy(pal.ambientSky);
     this.hemi.groundColor.copy(pal.ambientGround);
     this.hemi.intensity = pal.ambientIntensity;
+    // Sky moods: slowly drifting haze and cloud cover so the same route never looks the same twice.
+    if (this.settings.skyMoods) {
+      const t = this.simTime, seedPhase = (this.seed % 1000) * 0.0063;
+      // Mostly clear-to-light haze; heavy haze and overcast are the occasional extremes, never the norm.
+      const haze = THREE.MathUtils.clamp(0.34 + 0.32 * Math.sin(t / 171 + seedPhase) * Math.sin(t / 263 + seedPhase * 1.7) + 0.22 * Math.sin(t / 97 + 4.5), 0, 1);
+      const cloudiness = THREE.MathUtils.clamp(0.5 + 0.5 * Math.sin(t / 211 + seedPhase * 2.3) * Math.cos(t / 149 + 0.6), 0, 1);
+      const q = this.quality;
+      this.fog.far = q.fogFar * THREE.MathUtils.lerp(1.15, 0.55, haze);
+      this.fog.near = this.fog.far * 0.22;
+      _hazeTint.set(0.93, 0.9, 0.86).multiplyScalar(THREE.MathUtils.lerp(0.9, 1.05, pal.daylight));
+      pal.fog.lerp(_hazeTint, haze * 0.32 * pal.daylight);
+      pal.horizon.lerp(_hazeTint, haze * 0.26 * pal.daylight);
+      pal.sunIntensity *= 1 - 0.28 * haze;
+      pal.ambientIntensity *= 1 + 0.18 * haze;
+      this.clouds.setCoverage(0.5 + 0.7 * cloudiness);
+      this.skyMoodState.haze = haze; this.skyMoodState.cloudiness = cloudiness;
+    } else if (this.skyMoodState.haze !== 0) {
+      this.fog.far = this.quality.fogFar; this.fog.near = this.fog.far * 0.22; this.clouds.setCoverage(1);
+      this.skyMoodState.haze = 0; this.skyMoodState.cloudiness = 0;
+    }
     this.fog.color.copy(pal.fog);
     this.renderer.setClearColor(pal.fog);
     this.sky.update(this.camera.position, pal, this.day.sunDir, this.day.moonDir, this.simTime);
@@ -824,8 +848,15 @@ export class App {
     this.minimap.update(this.wallTime);
   }
 
+  private portraitsReady = false;
+  private skyMoodState = { haze: 0, cloudiness: 0 };
+
   private openSettings(): void {
     if (this.settingsPanel.visible) return;
+    if (!this.portraitsReady) {
+      this.portraitsReady = true;
+      try { this.settingsPanel.setPortraits(renderBirdPortraits(this.renderer)); } catch (err) { console.warn('[skybound] bird portraits unavailable', err); }
+    }
     this.phaseBeforeSettings = this.phase;
     this.pauseMenu.hide();
     this.startScreen.root.inert = true;
@@ -848,6 +879,7 @@ export class App {
     saveSettings(this.store, this.settings);
     if (this.phaseBeforeSettings === 'flying') this.resume();
     else if (this.phaseBeforeSettings === 'paused') {
+      if (this.audio.started && !this.audio.wasSuspendedByUs) void this.audio.suspend(); // music preview ends with the dialog
       this.pauseMenu.show(`Seed ${this.seed}`);
       this.pauseMenu.root.querySelector<HTMLButtonElement>('[data-action="settings"]')?.focus();
     } else this.input.blocked = false;
@@ -857,6 +889,7 @@ export class App {
     const prevQuality = this.settings.quality;
     const prevSpecies = this.settings.birdSpecies;
     const prevDynamic = this.settings.dynamicResolution;
+    const prevMusic = this.settings.musicStyle;
     this.settings = s;
     saveSettings(this.store, s);
     this.input.sensitivity = s.sensitivity;
@@ -866,7 +899,15 @@ export class App {
     this.audio.setVolume(s.volume);
     this.audio.setMuted(s.muted);
     this.audio.setMix(s);
+    if (s.musicStyle !== prevMusic) {
+      this.audio.setMusicStyle(s.musicStyle);
+      // Picking a style is a user gesture: start the mix so the choice is audible right away,
+      // even from the start screen or the pause menu (re-suspended when Settings closes to pause).
+      if (!this.audio.started) this.audio.start();
+      else if (this.settingsPanel.visible && this.audio.wasSuspendedByUs) void this.audio.resume();
+    }
     if (s.birdSpecies !== prevSpecies) {
+      this.flight.setProfile(BIRD_SPECIES[s.birdSpecies].profile);
       const next = new BirdModel(s.birdSpecies);
       next.group.position.copy(this.bird.group.position);
       next.group.quaternion.copy(this.bird.group.quaternion);
@@ -1023,6 +1064,8 @@ export class App {
       birdSpecies: () => this.bird.species,
       wildlife: () => this.wildlife.counts(),
       settingsVisible: () => this.settingsPanel.visible,
+      musicStyle: () => this.audio.currentMusicStyle,
+      skyMood: () => ({ ...this.skyMoodState, fogFar: this.fog.far }),
     };
   }
 

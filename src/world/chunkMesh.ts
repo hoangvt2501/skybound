@@ -273,8 +273,9 @@ const COVER_CELLS = Math.floor(CHUNK_SIZE / COVER_CELL);
 export const COVER_STRIDE = 6;
 
 /**
- * Near-field ground cover (grass tufts, dry tufts, reeds): purely visual,
- * never an obstacle. `density` is the preset multiplier.
+ * Near-field ground cover (grass tufts, dry tufts, reeds, wildflowers): purely
+ * visual, never an obstacle. `density` is the preset multiplier. Kinds 4-6 are
+ * flowers (poppies, daisies, lupines) that appear in patches on meadows and uplands.
  */
 export function buildGroundCover(gen: WorldGen, cx: number, cz: number, density: number): Float32Array {
   const ox = cx * CHUNK_SIZE, oz = cz * CHUNK_SIZE;
@@ -292,14 +293,18 @@ export function buildGroundCover(gen: WorldGen, cx: number, cz: number, density:
       const w = sample.weights;
       let p = w[0] * 0.9 + w[5] * 0.9 + w[4] * 0.85 + w[2] * 0.3 + w[3] * 0.18 + w[1] * 0.35;
       if (h > sample.snowLine - 120) p *= 0.2;
-      p *= density * 0.55;
+      const meadow = w[5] + w[0] * 0.75 + w[4] * 0.3;
+      const patch = meadow > 0.45 && h > 2 && h < sample.snowLine - 150 ? gen.flowerPatch(x, z) : 0;
+      p *= density * 0.55 * (1 + patch * 2.2); // flower patches are much denser than plain grass
       if (roll >= p) continue;
       let kind = 0;
-      if (w[5] > 0.5) kind = 1;
+      const flowerRoll = rng.next();
+      if (patch > 0 && flowerRoll < patch * 0.92) kind = 4 + Math.floor(rng.next() * 3);
+      else if (w[5] > 0.5) kind = 1;
       else if (w[3] > 0.4 || w[2] > 0.5) kind = 2;
       else if (w[4] > 0.5) kind = 3;
-      else kind = rng.next() < 0.5 ? 0 : 1;
-      out.push(x, h, z, 0.8 + sc * 0.9, rot * Math.PI * 2, kind);
+      else kind = flowerRoll < 0.5 ? 0 : 1;
+      out.push(x, h, z, (kind >= 4 ? 0.7 : 0.8) + sc * (kind >= 4 ? 0.6 : 0.9), rot * Math.PI * 2, kind);
     }
   }
   return Float32Array.from(out);

@@ -1,11 +1,14 @@
-/** Quiet procedural soundscape. Three independent buses, bounded voices, no downloads. */
+/** Procedural soundscape. Three independent buses, bounded voices, no downloads. */
+import { MusicBox, type MusicStyle } from './Music';
+
 export interface SoundMix { ambienceVolume: number; musicVolume: number; effectsVolume: number }
 export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number }
 const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
+/** Total wind level for a speed; the two layers below split it by timbre. */
 export function windLevel(speed: number, boosting: boolean): number {
   const amount = clamp((speed - 10) / 75);
-  return 0.035 + amount * 0.12 + (boosting ? 0.018 : 0);
+  return 0.02 + amount * 0.09 + (boosting ? 0.02 : 0);
 }
 
 export class AudioSystem {
@@ -14,22 +17,27 @@ export class AudioSystem {
   private ambience: GainNode | null = null;
   private music: GainNode | null = null;
   private effects: GainNode | null = null;
-  private windGain: GainNode | null = null;
-  private windFilter: BiquadFilterNode | null = null;
+  /** Airy mid-band rush: the "wind past your face" layer, gusting slowly. */
+  private airGain: GainNode | null = null;
+  private airFilter: BiquadFilterNode | null = null;
+  /** Low rumble, only noticeable when diving fast or boosting. */
+  private rushGain: GainNode | null = null;
   private flapGain: GainNode | null = null;
   private waterGain: GainNode | null = null;
   private sources: AudioScheduledSourceNode[] = [];
-  private pads: OscillatorNode[] = [];
+  private musicBox: MusicBox | null = null;
+  private musicStyle: MusicStyle = 'sunny';
   private volume = 0.45;
   private muted = false;
-  private mix: SoundMix = { ambienceVolume: 0.55, musicVolume: 0.2, effectsVolume: 0.45 };
+  private mix: SoundMix = { ambienceVolume: 0.55, musicVolume: 0.35, effectsVolume: 0.45 };
   private suspendedByUs = false;
   private transition = 0;
   private flapPhase = 0;
   private nextControl = 0;
   private nextBird = 5;
-  private nextChord = 16;
-  private chord = 0;
+  private gust = 1;
+  private gustTarget = 1;
+  private nextGust = 0;
   private lastChime = -10;
   private liveVoices = 0;
   started = false;
@@ -54,11 +62,16 @@ export class AudioSystem {
       this.ambience.connect(this.master); this.music.connect(this.master); this.effects.connect(this.master);
       this.setMix(this.mix);
       const buffer = this.makeNoise(ctx, 4);
-      this.windFilter = ctx.createBiquadFilter();
-      this.windFilter.type = 'lowpass'; this.windFilter.frequency.value = 330; this.windFilter.Q.value = 0.45;
-      this.windGain = ctx.createGain(); this.windGain.gain.value = 0;
-      const wind = this.loopNoise(buffer);
-      wind.connect(this.windFilter).connect(this.windGain).connect(this.ambience);
+      // Wind: a bright, gusting band of air plus a quiet low rush. The old
+      // single 330 Hz low-pass drone read as an aircraft cabin.
+      this.airFilter = ctx.createBiquadFilter();
+      this.airFilter.type = 'bandpass'; this.airFilter.frequency.value = 900; this.airFilter.Q.value = 0.55;
+      this.airGain = ctx.createGain(); this.airGain.gain.value = 0;
+      this.loopNoise(buffer).connect(this.airFilter).connect(this.airGain).connect(this.ambience);
+      const rushFilter = ctx.createBiquadFilter();
+      rushFilter.type = 'lowpass'; rushFilter.frequency.value = 190; rushFilter.Q.value = 0.5;
+      this.rushGain = ctx.createGain(); this.rushGain.gain.value = 0;
+      this.loopNoise(buffer).connect(rushFilter).connect(this.rushGain).connect(this.ambience);
       const flapFilter = ctx.createBiquadFilter();
       flapFilter.type = 'bandpass'; flapFilter.frequency.value = 160; flapFilter.Q.value = 0.65;
       this.flapGain = ctx.createGain(); this.flapGain.gain.value = 0;
@@ -67,19 +80,8 @@ export class AudioSystem {
       waterFilter.type = 'lowpass'; waterFilter.frequency.value = 950; waterFilter.Q.value = 0.4;
       this.waterGain = ctx.createGain(); this.waterGain.gain.value = 0;
       this.loopNoise(buffer).connect(waterFilter).connect(this.waterGain).connect(this.ambience);
-
-      // Warm D-major suspended pad. Fixed voice count; pitches glide between
-      // related voicings instead of overlapping unrelated random notes.
-      const frequencies = [146.83, 220, 329.63];
-      const padFilter = ctx.createBiquadFilter(); padFilter.type = 'lowpass'; padFilter.frequency.value = 650;
-      padFilter.connect(this.music);
-      for (let i = 0; i < frequencies.length; i++) {
-        const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.value = frequencies[i];
-        const gain = ctx.createGain(); gain.gain.value = 0.045;
-        const pan = ctx.createStereoPanner(); pan.pan.value = (i - 1) * 0.38;
-        osc.connect(gain).connect(pan).connect(padFilter);
-        osc.start(); this.pads.push(osc); this.sources.push(osc);
-      }
+      this.musicBox = new MusicBox(ctx, this.music);
+      this.musicBox.setStyle(this.musicStyle);
       this.started = true;
       void this.resume();
     } catch {
@@ -117,6 +119,12 @@ export class AudioSystem {
     this.effects?.gain.setTargetAtTime(this.mix.effectsVolume, t, 0.2);
   }
 
+  setMusicStyle(style: MusicStyle): void {
+    this.musicStyle = style;
+    this.musicBox?.setStyle(style);
+  }
+  get currentMusicStyle(): MusicStyle { return this.musicStyle; }
+
   private fadeMaster(): void {
     if (this.master && this.ctx) this.master.gain.setTargetAtTime(this.muted || this.suspendedByUs ? 0 : this.volume, this.ctx.currentTime, 0.08);
   }
@@ -124,7 +132,7 @@ export class AudioSystem {
   setMuted(m: boolean): void { this.muted = m; this.fadeMaster(); }
 
   update(dt: number, speed: number, flapping: boolean, boosting: boolean, beatRate: number, environment: SoundEnvironment = { aboveGround: 200, water: false, daylight: 1 }): void {
-    if (!this.ctx || !this.windGain || !this.windFilter || !this.flapGain || this.ctx.state !== 'running' || this.suspendedByUs) return;
+    if (!this.ctx || !this.airGain || !this.airFilter || !this.rushGain || !this.flapGain || this.ctx.state !== 'running' || this.suspendedByUs) return;
     const t = this.ctx.currentTime;
     this.flapPhase += dt * (flapping ? 3.1 * beatRate : 0.35);
     if (this.flapPhase >= 1) {
@@ -135,17 +143,17 @@ export class AudioSystem {
     }
     if (t < this.nextControl) return;
     this.nextControl = t + 0.05; // Audio automation does not need render-rate writes.
-    const strength = clamp((speed - 10) / 75);
-    this.windGain.gain.setTargetAtTime(windLevel(speed, boosting), t, 0.6);
-    this.windFilter.frequency.setTargetAtTime(280 + strength * 460, t, 0.8);
+    this.musicBox?.pump(t);
+    // Gusts: a slow random walk so the air never sits on one level.
+    if (t >= this.nextGust) { this.gustTarget = 0.6 + Math.random() * 0.65; this.nextGust = t + 1.5 + Math.random() * 3.5; }
+    this.gust += (this.gustTarget - this.gust) * 0.05;
+    const amount = clamp((speed - 10) / 75);
+    const total = windLevel(speed, boosting);
+    this.airGain.gain.setTargetAtTime(total * 0.75 * this.gust, t, 0.5);
+    this.airFilter.frequency.setTargetAtTime(700 + amount * 900 + (boosting ? 250 : 0), t, 0.8);
+    this.rushGain.gain.setTargetAtTime(total * (0.15 + 0.85 * amount * amount) * (boosting ? 1.4 : 0.9), t, 0.7);
     const near = 1 - clamp(environment.aboveGround / 200);
     this.waterGain?.gain.setTargetAtTime(environment.water ? near * (0.06 + Math.sin(t * 0.35) * 0.012) : 0, t, 2);
-    if (t >= this.nextChord) {
-      const chords = [[146.83, 220, 329.63], [130.81, 196, 293.66], [123.47, 185, 293.66], [146.83, 220, 277.18]];
-      this.chord = (this.chord + 1) % chords.length;
-      this.pads.forEach((pad, i) => pad.frequency.setTargetAtTime(chords[this.chord][i], t, 3));
-      this.nextChord = t + 20;
-    }
     if (t >= this.nextBird) {
       this.nextBird = t + 9 + Math.random() * 12;
       if (near > 0.12 && environment.daylight > 0.25 && !environment.water && !this.muted && this.mix.ambienceVolume > 0) {
@@ -199,8 +207,9 @@ export class AudioSystem {
   get wasSuspendedByUs(): boolean { return this.suspendedByUs; }
   dispose(): void {
     ++this.transition;
+    this.musicBox?.dispose(); this.musicBox = null;
     for (const source of this.sources) { try { source.stop(); source.disconnect(); } catch { /* already stopped */ } }
-    this.sources.length = 0; this.pads.length = 0;
+    this.sources.length = 0;
     void this.ctx?.close().catch(() => {});
     this.ctx = null; this.master = null; this.ambience = null; this.music = null; this.effects = null;
     this.started = false;

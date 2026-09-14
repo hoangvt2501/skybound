@@ -1,5 +1,6 @@
 /** One modal above start/pause/map, with bounded scrolling and focus ownership. */
-import { BIRD_SPECIES } from '../flight/BirdSpecies';
+import { BIRD_SPECIES, type BirdSpecies } from '../flight/BirdSpecies';
+import { MUSIC_STYLES } from '../atmosphere/Music';
 import type { Settings } from '../persistence/Settings';
 
 export interface SettingsPanelOptions {
@@ -18,6 +19,7 @@ export class SettingsPanel {
   private timeInput: HTMLInputElement;
   private cycleInput: HTMLInputElement;
   private returnFocus: HTMLElement | null = null;
+  private portraits: Partial<Record<BirdSpecies, string>> = {};
 
   constructor(container: HTMLElement, settings: Settings, opts: SettingsPanelOptions) {
     this.settings = settings;
@@ -34,23 +36,33 @@ export class SettingsPanel {
         <header class="settings-header"><div><h2 id="settings-title">Settings</h2><p class="muted small">Your bird, your soundscape, your pace.</p></div><button class="btn" data-action="close" aria-label="Close settings">✕</button></header>
         <div class="settings-body">
           <fieldset><legend>Your bird</legend><div class="settings-grid">
-            <label>Fly as<select data-key="birdSpecies">${Object.entries(BIRD_SPECIES).map(([id, b]) => `<option value="${id}">${b.name}</option>`).join('')}</select></label>
+            <div class="bird-picker" role="radiogroup" aria-label="Fly as">${Object.entries(BIRD_SPECIES).map(([id, b]) => `
+              <button type="button" class="bird-card" role="radio" aria-checked="false" data-species="${id}">
+                <span class="bird-portrait" aria-hidden="true"><img alt="" width="320" height="220"></span>
+                <span class="bird-name">${b.name}</span>
+                <span class="bird-blurb">${b.blurb[0]}</span>
+                <span class="bird-blurb muted">${b.blurb[1]}</span>
+                <span class="bird-traits">${(['speed', 'agility', 'glide', 'power'] as const).map(k => `<span><i>${k[0].toUpperCase() + k.slice(1)}</i><b aria-label="${b.traits[k]} of 5">${'●'.repeat(b.traits[k])}${'○'.repeat(5 - b.traits[k])}</b></span>`).join('')}</span>
+              </button>`).join('')}</div>
             <p class="muted small bird-description" aria-live="polite"></p>
-          </div><p class="muted small">Different silhouettes and wingbeats; the same familiar flight controls.</p></fieldset>
+          </div><p class="muted small">Each bird has its own silhouette, wingbeat and handling; the controls stay the same.</p></fieldset>
           <fieldset><legend>Soundscape</legend><div class="settings-grid">
             ${slider('Master volume', 'volume')}
             <label><input type="checkbox" data-key="muted"> Mute all sounds</label>
             ${slider('Nature & wind', 'ambienceVolume')}
-            ${slider('Gentle music', 'musicVolume')}
+            <label>Music<select data-key="musicStyle">${MUSIC_STYLES.map(m => `<option value="${m.id}">${m.name}</option>`).join('')}</select></label>
+            <p class="muted small music-description" aria-live="polite"></p>
+            ${slider('Music volume', 'musicVolume')}
             ${slider('Wings & discoveries', 'effectsVolume')}
-          </div><p class="muted small">Sound starts when you begin flying. Set Gentle music to zero for nature only.</p></fieldset>
+          </div><p class="muted small">Changing the music plays a preview right away; sound otherwise starts when you begin flying.</p></fieldset>
           <fieldset><legend>World & performance</legend><div class="settings-grid">
             <label>Quality<select data-key="quality"><option value="low">Low · lighter rendering</option><option value="medium">Medium · balanced</option><option value="high">High · richer detail</option></select></label>
-            <label>Wildlife<select data-key="wildlife"><option value="off">Off</option><option value="subtle">Subtle · occasional company</option><option value="lively">Lively · more encounters</option></select></label>
+            <label>Ambient life<select data-key="wildlife"><option value="off">Off</option><option value="subtle">Subtle · occasional company</option><option value="lively">Lively · more encounters</option></select></label>
+            <label><input type="checkbox" data-key="skyMoods"> Changing skies (haze &amp; cloud cover)</label>
             <label><input type="checkbox" data-key="dynamicResolution"> Adaptive resolution</label>
             <label><input type="checkbox" class="cycle-input"> Day/night cycle</label>
             <label>Time of day<input type="range" min="0" max="1" step="0.005" class="time-input"></label>
-          </div><p class="muted small">Adaptive resolution lowers rendering cost when frames take longer. Wildlife stays within a fixed population limit.</p></fieldset>
+          </div><p class="muted small">Adaptive resolution lowers rendering cost when frames take longer. Ambient life (flocks, deer, ducks, balloons, sailboats) stays within a fixed population limit.</p></fieldset>
           <fieldset><legend>Camera & controls</legend><div class="settings-grid">
             ${slider('Mouse sensitivity', 'sensitivity', 0.3, 2.5, 0.1)}
             <label><input type="checkbox" data-key="autoCenterCamera"> Auto-center camera</label>
@@ -68,11 +80,27 @@ export class SettingsPanel {
     for (const el of this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-key]')) {
       el.addEventListener(el instanceof HTMLInputElement && el.type === 'range' ? 'input' : 'change', () => this.read());
     }
+    for (const card of this.root.querySelectorAll<HTMLButtonElement>('.bird-card')) {
+      card.addEventListener('click', () => {
+        const species = card.dataset.species as BirdSpecies;
+        if (species === this.settings.birdSpecies) return;
+        this.settings = { ...this.settings, birdSpecies: species };
+        this.read();
+      });
+    }
     this.timeInput.addEventListener('input', () => opts.setTimeOfDay(Number(this.timeInput.value)));
     this.cycleInput.addEventListener('change', () => opts.setCycling(this.cycleInput.checked));
     this.root.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Escape') { e.preventDefault(); opts.onClose(); return; }
+      if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft' || e.key === 'ArrowDown' || e.key === 'ArrowUp') && (e.target as HTMLElement).classList?.contains('bird-card')) {
+        e.preventDefault();
+        const cards = Array.from(this.root.querySelectorAll<HTMLButtonElement>('.bird-card'));
+        const index = cards.indexOf(e.target as HTMLButtonElement), step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
+        const next = cards[(index + step + cards.length) % cards.length];
+        next.focus(); next.click();
+        return;
+      }
       if (e.key !== 'Tab') return;
       const elements = Array.from(this.root.querySelectorAll<HTMLElement>('button, input, select, summary')).filter(el => !el.closest('details:not([open])') || el.tagName === 'SUMMARY');
       const first = elements[0], last = elements[elements.length - 1];
@@ -87,7 +115,14 @@ export class SettingsPanel {
       const key = el.dataset.value as keyof Settings;
       el.textContent = key === 'sensitivity' ? `${Number(this.settings[key]).toFixed(1)}×` : `${Math.round(Number(this.settings[key]) * 100)}%`;
     }
-    this.root.querySelector('.bird-description')!.textContent = BIRD_SPECIES[this.settings.birdSpecies].description;
+    this.root.querySelector('.bird-description')!.textContent = `${BIRD_SPECIES[this.settings.birdSpecies].name}: ${BIRD_SPECIES[this.settings.birdSpecies].description}`;
+    for (const card of this.root.querySelectorAll<HTMLButtonElement>('.bird-card')) {
+      const selected = card.dataset.species === this.settings.birdSpecies;
+      card.setAttribute('aria-checked', String(selected));
+      card.classList.toggle('selected', selected);
+      card.tabIndex = selected ? 0 : -1;
+    }
+    this.root.querySelector('.music-description')!.textContent = MUSIC_STYLES.find(m => m.id === this.settings.musicStyle)?.description ?? '';
   }
 
   private write(): void {
@@ -118,13 +153,24 @@ export class SettingsPanel {
     this.settings = settings;
     this.write();
     this.root.hidden = false;
-    this.root.querySelector<HTMLSelectElement>('[data-key="birdSpecies"]')!.focus();
+    (this.root.querySelector<HTMLElement>('.bird-card.selected') ?? this.root.querySelector<HTMLElement>('.bird-card'))!.focus();
   }
 
   hide(): void {
     this.root.hidden = true;
     if (this.returnFocus?.isConnected) this.returnFocus.focus();
     this.returnFocus = null;
+  }
+
+  /** Rendered portraits (data URLs) for the picker cards; may arrive after construction. */
+  setPortraits(portraits: Partial<Record<BirdSpecies, string>>): void {
+    this.portraits = { ...this.portraits, ...portraits };
+    for (const card of this.root.querySelectorAll<HTMLButtonElement>('.bird-card')) {
+      const url = this.portraits[card.dataset.species as BirdSpecies];
+      const img = card.querySelector('img')!;
+      if (url && img.src !== url) img.src = url;
+      card.classList.toggle('has-portrait', !!url);
+    }
   }
 
   get visible(): boolean { return !this.root.hidden; }

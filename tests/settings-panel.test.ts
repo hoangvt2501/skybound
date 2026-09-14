@@ -31,10 +31,18 @@ describe('Settings interactions', () => {
   });
   it('emits one change per selection and updates bird description and volume labels', () => {
     const { panel, changed } = setup();
-    const bird = panel.root.querySelector<HTMLSelectElement>('[data-key="birdSpecies"]')!;
-    bird.value = 'swallow'; bird.dispatchEvent(new Event('change', { bubbles: true }));
+    const cards = panel.root.querySelectorAll<HTMLButtonElement>('.bird-card');
+    expect(cards.length).toBe(4);
+    expect(panel.root.querySelector('.bird-card.selected')!.getAttribute('data-species')).toBe('eagle');
+    panel.root.querySelector<HTMLButtonElement>('.bird-card[data-species="swallow"]')!.click();
     expect(changed).toHaveBeenCalledOnce(); expect(changed.mock.calls[0][0].birdSpecies).toBe('swallow');
     expect(panel.root.querySelector('.bird-description')!.textContent).toContain('forked');
+    expect(panel.root.querySelector('.bird-card[data-species="swallow"]')!.getAttribute('aria-checked')).toBe('true');
+    panel.root.querySelector<HTMLButtonElement>('.bird-card[data-species="swallow"]')!.click(); // re-clicking the selection emits nothing
+    expect(changed).toHaveBeenCalledOnce();
+    panel.setPortraits({ owl: 'data:image/png;base64,AAAA' });
+    expect(panel.root.querySelector<HTMLImageElement>('.bird-card[data-species="owl"] img')!.src).toContain('data:image/png');
+    expect(panel.root.querySelector('.bird-card[data-species="owl"]')!.classList.contains('has-portrait')).toBe(true);
     const music = panel.root.querySelector<HTMLInputElement>('[data-key="musicVolume"]')!;
     music.value = '0'; music.dispatchEvent(new Event('input', { bubbles: true }));
     expect(panel.root.querySelector('[data-value="musicVolume"]')!.textContent).toBe('0%');

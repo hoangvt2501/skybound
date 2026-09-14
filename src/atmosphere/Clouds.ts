@@ -187,6 +187,7 @@ export class Clouds {
   private masses = new Map<string, CloudMass>();
   private lastCell = { x: NaN, z: NaN };
   private maxPuffs: number;
+  private coverage = 1;
   private aLight: THREE.InstancedBufferAttribute;
   private aVariant: THREE.InstancedBufferAttribute;
   private order: { d: number; mass: CloudMass; puff: Puff; x: number; y: number; z: number }[] = [];
@@ -202,6 +203,7 @@ export class Clouds {
           uMap: { value: this.sprite },
           uLit: { value: new THREE.Color(1, 1, 1) },
           uShade: { value: new THREE.Color(0.6, 0.65, 0.75) },
+          uCover: { value: 1 },
           uSprites: { value: SPRITES },
         },
       ]),
@@ -234,6 +236,7 @@ export class Clouds {
         uniform sampler2D uMap;
         uniform vec3 uLit;
         uniform vec3 uShade;
+        uniform float uCover;
         varying vec2 vUv;
         varying float vLight;
         varying float vNear;
@@ -244,7 +247,7 @@ export class Clouds {
           a *= smoothstep(25.0, 140.0, vNear);
           if (a < 0.02) discard;
           vec3 col = mix(uShade, uLit, vLight);
-          gl_FragColor = vec4(col, a * 0.92);
+          gl_FragColor = vec4(col, a * 0.92 * mix(0.45, 1.0, uCover));
           #include <fog_fragment>
         }
       `,
@@ -318,6 +321,12 @@ export class Clouds {
     return mass;
   }
 
+  /** 0..1.2: thin, sparse cover to heavy overcast. Affects puff opacity and flattens the lit/shade contrast. */
+  setCoverage(c: number): void {
+    this.coverage = THREE.MathUtils.clamp(c, 0, 1.2);
+    this.puffMaterial.uniforms.uCover.value = this.coverage;
+  }
+
   update(cameraRender: THREE.Vector3, originX: number, originZ: number, time: number, sunDir: THREE.Vector3, sunColor: THREE.Color, daylight: number, fogColor: THREE.Color): void {
     // Cirrus follows the camera; UVs are world anchored.
     this.cirrus.mesh.position.x = cameraRender.x;
@@ -330,6 +339,9 @@ export class Clouds {
     // Puff colors for the hour.
     const lit = new THREE.Color(1, 1, 1).lerp(sunColor, 0.45).multiplyScalar(THREE.MathUtils.lerp(0.28, 1.0, daylight));
     const shade = fogColor.clone().multiplyScalar(THREE.MathUtils.lerp(0.55, 0.78, daylight));
+    // Overcast skies flatten the contrast between lit tops and shaded bellies.
+    const flat = THREE.MathUtils.clamp((this.coverage - 0.9) * 1.5, 0, 0.45);
+    lit.lerp(shade, flat); shade.lerp(lit, flat * 0.5);
     (this.puffMaterial.uniforms.uLit.value as THREE.Color).copy(lit);
     (this.puffMaterial.uniforms.uShade.value as THREE.Color).copy(shade);
 

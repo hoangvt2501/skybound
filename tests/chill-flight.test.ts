@@ -60,8 +60,11 @@ describe('bird and sound preferences', () => {
   it('migrates missing options and validates untrusted saved preferences', () => {
     const settings = validateSettings({ quality: 'medium', volume: 0.4, birdSpecies: '__proto__', wildlife: 'unlimited', musicVolume: NaN, ambienceVolume: 12, effectsVolume: -5 });
     expect(settings.birdSpecies).toBe('eagle'); expect(settings.wildlife).toBe('subtle');
-    expect(settings.musicVolume).toBe(0.2); expect(settings.ambienceVolume).toBe(1); expect(settings.effectsVolume).toBe(0);
-    expect(validateSettings({ birdSpecies: 'swallow', wildlife: 'off', musicVolume: 0 }).musicVolume).toBe(0);
+    expect(settings.musicVolume).toBe(0.35); expect(settings.ambienceVolume).toBe(1); expect(settings.effectsVolume).toBe(0); expect(settings.musicStyle).toBe('sunny');
+    // Preferences saved before music existed keep the new default level; ones that know about music keep theirs.
+    expect(validateSettings({ birdSpecies: 'swallow', wildlife: 'off', musicVolume: 0 }).musicVolume).toBe(0.35);
+    expect(validateSettings({ musicStyle: 'waltz', musicVolume: 0 })).toMatchObject({ musicStyle: 'waltz', musicVolume: 0 });
+    expect(validateSettings({ musicStyle: 'polka' }).musicStyle).toBe('sunny');
   });
   it('builds distinct silhouettes with finite animation transforms for every selectable species', () => {
     const spans = new Set<number>();
@@ -95,13 +98,13 @@ describe('bounded ambient wildlife', () => {
     const gen = new WorldGen(1207), world = new Wildlife(gen, (x, z) => Math.max(0, gen.heightAt(x, z)));
     const L = gen.layout, wet = gen.regionToWorld(L.wet.x, L.wet.y), spine = gen.regionToWorld(L.spine[1][0], L.spine[1][1]);
     const px = wet.x + (spine.x - wet.x) * 0.3, pz = wet.z + (spine.z - wet.z) * 0.3;
-    for (let i = 0; i < 80; i++) world.update(i / 60, px, 60, pz, 0, 0, 'lively', 'high'); // one habitat per frame
+    for (let i = 0; i < 140; i++) world.update(i / 60, px, 60, pz, 0, 0, 'lively', 'high'); // one habitat per frame (49 ground + 9 flock + 25 balloon cells)
     const count = world.counts();
     expect(count.ducks).toBeGreaterThan(0); expect(count.deer).toBeGreaterThan(0); expect(count.birds).toBeGreaterThan(0);
     // Animals animate on the GPU: with the same nearby set, later frames upload no instance data at all.
     world.update(2, px, 60, pz, 0, 0, 'lively', 'high');
     const live = world.group.children.filter((o): o is THREE.InstancedMesh => o instanceof THREE.InstancedMesh && o.visible && o.count > 0);
-    expect(live.length).toBe(3);
+    expect(live.length).toBeGreaterThanOrEqual(3); // birds, deer, ducks (balloons and boats depend on the spot)
     const versionsOf = (m: THREE.InstancedMesh) => [m.instanceMatrix.version, (m.geometry.attributes.aPhase as THREE.BufferAttribute).version, (m.geometry.attributes.aOrbit as THREE.BufferAttribute).version];
     const versions = live.map(versionsOf);
     for (let i = 1; i <= 30; i++) world.update(2 + i / 60, px, 60, pz, 0, 0, 'lively', 'high');
@@ -122,6 +125,6 @@ describe('bounded ambient wildlife', () => {
     world.update(4, 4000, 160, -1700, 4000, -2000, 'subtle', 'medium');
     world.group.traverse(o => { if (o instanceof THREE.InstancedMesh) expect(Array.from(o.instanceMatrix.array).every(Number.isFinite)).toBe(true); });
     world.update(4, 4000, 160, -1700, 4000, -2000, 'off', 'medium');
-    expect(world.counts()).toEqual({ birds: 0, deer: 0, ducks: 0 }); world.dispose();
+    expect(world.counts()).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0 }); world.dispose();
   });
 });

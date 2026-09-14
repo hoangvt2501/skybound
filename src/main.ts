@@ -1,6 +1,7 @@
 import './styles.css';
 import { App } from './core/App';
 import { SHOWCASE_SEED } from './core/config';
+import { MusicBox } from './atmosphere/Music';
 import { clearSave, loadSave, resolveSeed } from './persistence/Save';
 import { loadSettings } from './persistence/Settings';
 import { LocalStore } from './persistence/Storage';
@@ -61,6 +62,7 @@ function boot(): void {
       migrated: resolved.migrated,
     });
     (window as unknown as { skybound: unknown }).skybound = app;
+    (window as unknown as { __musicModule: unknown }).__musicModule = { MusicBox }; // offline render checks
     // eslint-disable-next-line no-console
     console.info(`[skybound] seed ${resolved.seed} (${resolved.reason}); storage ${store.available ? 'ok' : 'unavailable'}`);
   } catch (err) {

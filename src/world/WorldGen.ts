@@ -386,6 +386,11 @@ export class WorldGen {
   }
 
   /** Gradient magnitude (rise over run) from central differences. */
+  /** 0..1 wildflower patch field for meadow ground cover (about 90 m blobs). */
+  flowerPatch(x: number, z: number): number {
+    return smoothstep(0.12, 0.5, this.nVeg.noise(x / 95 + 11.3, z / 95 - 7.1));
+  }
+
   slopeAt(x: number, z: number, d = 6): number {
     const hx = this.heightAt(x + d, z) - this.heightAt(x - d, z);
     const hz = this.heightAt(x, z + d) - this.heightAt(x, z - d);
@@ -519,22 +524,22 @@ export class WorldGen {
     let species = Species.Oak;
     switch (s.biome) {
       case Biome.Temperate:
-        species = u < 0.58 ? Species.Oak : u < 0.85 ? Species.Pine : Species.Birch;
+        species = u < 0.56 ? Species.Oak : u < 0.82 ? Species.Pine : u < 0.96 ? Species.Birch : Species.Rock;
         break;
       case Biome.Alpine:
-        species = u < 0.9 ? Species.Pine : Species.Birch;
+        species = u < 0.66 ? Species.Pine : u < 0.76 ? Species.Birch : Species.Rock;
         break;
       case Biome.Coast:
         species = u < 0.45 ? Species.Palm : Species.Shrub;
         break;
       case Biome.Arid:
-        species = u < 0.35 ? Species.Cactus : u < 0.6 ? Species.Deadwood : Species.Shrub;
+        species = u < 0.3 ? Species.Cactus : u < 0.5 ? Species.Deadwood : u < 0.74 ? Species.Shrub : Species.Rock;
         break;
       case Biome.Wetland:
         species = u < 0.55 ? Species.Willow : Species.Shrub;
         break;
       case Biome.Upland:
-        species = u < 0.45 ? Species.Birch : u < 0.75 ? Species.Shrub : Species.Oak;
+        species = u < 0.4 ? Species.Birch : u < 0.66 ? Species.Shrub : u < 0.86 ? Species.Oak : Species.Rock;
         break;
       default:
         density = 0;

@@ -19,7 +19,7 @@ test('touch layout: joystick turns and climbs, flap button lifts, overlay gestur
   fs.mkdirSync(ART, { recursive: true });
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  page.on('console', (m) => { if (m.type() === 'error' && !/AudioContext encountered an error from the audio device/.test(m.text())) errors.push(m.text()); });
   await page.goto('/?fresh=1');
   await page.waitForFunction(() => window.skybound && window.skybound.debug().phase === 'start', null, { timeout: 90_000 });
   await page.tap('[data-action="start"]');

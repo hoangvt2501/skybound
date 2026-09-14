@@ -82,9 +82,45 @@ const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi 
 /** Frame-rate independent exponential approach factor. */
 const approach = (rate: number, dt: number) => 1 - Math.exp(-rate * dt);
 
+/**
+ * Per-species multipliers on the shared flight constants. 1 everywhere is the
+ * reference bird; the ranges stay modest so every bird flies the same route.
+ */
+export interface FlightProfile {
+  /** Cruise, top and boost speeds. */
+  speed: number;
+  /** Turn rate and how quickly the bird answers the stick and banks. */
+  agility: number;
+  /** Thrust and lift from a wingbeat. */
+  flapPower: number;
+  /** Glide efficiency: shallower sink, cheaper climbs, less speed shed. */
+  glide: number;
+}
+export const DEFAULT_PROFILE: FlightProfile = { speed: 1, agility: 1, flapPower: 1, glide: 1 };
+
+export type FlightConstants = { -readonly [K in keyof typeof FLIGHT]: number };
+
+export function tuneFlight(p: FlightProfile): FlightConstants {
+  return {
+    ...FLIGHT,
+    cruiseSpeed: FLIGHT.cruiseSpeed * p.speed,
+    maxSpeed: FLIGHT.maxSpeed * p.speed,
+    boostMaxSpeed: FLIGHT.boostMaxSpeed * p.speed,
+    maxTurnRate: FLIGHT.maxTurnRate * p.agility,
+    turnResponse: FLIGHT.turnResponse * p.agility,
+    bankResponse: FLIGHT.bankResponse * p.agility,
+    flapAccel: FLIGHT.flapAccel * p.flapPower,
+    flapLift: FLIGHT.flapLift * p.flapPower,
+    glidePitch: FLIGHT.glidePitch / p.glide,
+    climbSpeedCost: FLIGHT.climbSpeedCost / p.glide,
+    drag: FLIGHT.drag / p.glide,
+  };
+}
+
 export class FlightController {
   readonly state: FlightState;
   private terrain: TerrainQuery;
+  private tuned = tuneFlight(DEFAULT_PROFILE);
   /** Called on terrain/obstacle impact with the impact speed. */
   onImpact: ((speed: number, kind: 'terrain' | 'water' | 'obstacle') => void) | null = null;
 
@@ -97,10 +133,16 @@ export class FlightController {
     this.terrain = t;
   }
 
+  /** Apply a species profile; takes effect from the next step. */
+  setProfile(p: FlightProfile): void {
+    this.tuned = tuneFlight(p);
+  }
+  get constants(): FlightConstants { return this.tuned; }
+
   /** Advance the model by one fixed step. */
   step(input: FlightInput, dt = SIM_STEP): void {
     const s = this.state;
-    const F = FLIGHT;
+    const F = this.tuned;
     s.impacted = false;
     s.time += dt;
 

@@ -38,10 +38,12 @@ export const enum Species {
   Deadwood = 5,
   Shrub = 6,
   Willow = 7,
+  /** Boulders: placed by the same deterministic rules as trees, so they are colliders too. */
+  Rock = 8,
 }
-export const SPECIES_COUNT = 8;
+export const SPECIES_COUNT = 9;
 
-export const SPECIES_NAMES = ['oak', 'pine', 'birch', 'palm', 'cactus', 'deadwood', 'shrub', 'willow'];
+export const SPECIES_NAMES = ['oak', 'pine', 'birch', 'palm', 'cactus', 'deadwood', 'shrub', 'willow', 'rock'];
 
 /** Collision radius and height (m) for a unit-scale instance of each species. */
 export const SPECIES_COLLIDER: { radius: number; height: number }[] = [
@@ -53,4 +55,5 @@ export const SPECIES_COLLIDER: { radius: number; height: number }[] = [
   { radius: 1.2, height: 8 },
   { radius: 1.4, height: 2.2 },
   { radius: 3.0, height: 8 },
+  { radius: 2.6, height: 3.2 },
 ];

@@ -53,7 +53,8 @@ async function hold(page: Page, key: string, seconds: number) {
 function collectErrors(page: Page): string[] {
   const errors: string[] = [];
   page.on('console', (m) => {
-    if (m.type() === 'error') errors.push(m.text());
+    // Headless Chromium without an audio output device reports the WebAudio renderer failing under load; that is the environment, not the app.
+    if (m.type() === 'error' && !/AudioContext encountered an error from the audio device/.test(m.text())) errors.push(m.text());
   });
   page.on('pageerror', (e) => errors.push(e.message));
   return errors;

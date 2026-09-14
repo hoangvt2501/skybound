@@ -59,7 +59,7 @@ No input = the bird keeps gliding with gentle drag and slow altitude loss. Divin
 
 Settings has an **Auto-center camera** toggle (off by default) that eases the view back behind the bird after a short idle time.
 
-**Settings** (from the start screen, the pause menu or the in-flight button) is a scrollable dialog that always sits above the other overlays: it takes focus when it opens, Tab stays inside it, Esc closes it and focus returns to the control that opened it. It holds the bird choice (**Eagle**, **Gull**, **Swallow**, **Owl**: different silhouettes, colours and wingbeat rhythm, same controls), the soundscape mixer (master, nature & wind, gentle music, wings & discoveries, mute) and the ambient wildlife density (**Off**, **Subtle**, **Lively**).
+**Settings** (from the start screen, the pause menu or the in-flight button) is a scrollable dialog that always sits above the other overlays: it takes focus when it opens, Tab stays inside it, Esc closes it and focus returns to the control that opened it. It holds the bird picker (four illustrated cards: **Eagle**, **Gull**, **Swallow**, **Owl**, each with its own silhouette, colours, wingbeat and handling: speed, agility, glide and flap power differ by up to about a third, the controls stay the same), the music style (**Sunny stroll**, **Meadow waltz**, **Island breeze**, **Calm pad**, **Off**: procedural tunes that start playing the moment you pick one), the soundscape mixer (master, nature & wind, music, wings & discoveries, mute), the ambient life density (**Off**, **Subtle**, **Lively**) and the **Changing skies** toggle.
 
 ## What is in the world
 
@@ -68,8 +68,9 @@ Settings has an **Auto-center camera** toggle (off by default) that eases the vi
 - 15 deterministic landmarks of 8 types (stone arch, lighthouse, cliffside ruins, giant tree, mountain shrine, canyon bridge, standing stones, watchtower), each with a stable id, name, position, colliders and a discovery radius. Discovery adds them to the journal and the map.
 - Water at global sea level (lakes are inland basins below sea level, coast and islands). Rivers are intentionally not shipped: coastlines and lakes first.
 - Day/night cycle with sun, moon and stars, cumulus clusters built from sorted billboard puffs (lit tops, shaded undersides) under a thin cirrus sheet, distance fog matched to the sky, animated water with surf only on exposed shores and calm lakes.
-- A procedural Web Audio soundscape with separate buses: filtered, gentle wind that stays bounded while boosting, soft wingbeats, water that fades in near shores and lakes, sparse daytime birdsong, and a quiet slowly-changing pad of chords. No audio files are shipped.
-- Ambient wildlife: small flocks circling over the land, deer resting in meadows and uplands, ducks swimming on ponds. Encounters are deterministic per seed, prepared one habitat per frame, purely decorative (no colliders), and capped per density setting.
+- A procedural Web Audio soundscape with separate buses: a bright, gusting band of air plus a low rush that only grows with speed, soft wingbeats, water that fades in near shores and lakes, sparse daytime birdsong, and a music box that composes short cheerful tunes on the fly (major keys, pentatonic melodies, four-chord loops, plucked or mallet leads, light percussion) in three styles plus a calm pad. No audio files are shipped.
+- Ambient life: small flocks circling over the land, deer resting in meadows and uplands, ducks swimming on ponds, hot-air balloons drifting above gentle country and sailboats on open water. Encounters are deterministic per seed, prepared one habitat per frame, animated on the GPU, purely decorative (no colliders), and capped per density setting.
+- Wildflower patches (poppies, daisies, lupines) on meadows and uplands, boulders on alpine, arid and upland slopes, and slowly changing skies: haze and cloud cover drift over minutes so the same route never looks quite the same.
 - Terrain shading is procedural per pixel: rock on steep faces with strata and cracks, snow that collects on shelves, wet banks, distance-aware grain. Trees have trunks, branches and layered crowns near the camera, billboard impostors further out, and grass tufts in the near field; trees are placed at a fixed density on every preset so collision is identical.
 
 Every seed gives a different island with the same geographic structure (a mountain spine, an arid quarter, a wetland coast, an upland quarter), so all six biomes are always reachable. The showcase seed is `1207`.
@@ -138,7 +139,7 @@ Everything tunable is in `src/core/config.ts`:
 - `FLIGHT`: cruise/max/boost speeds, drag, gravity gain, pitch/turn/bank rates, boost capacity and recovery, ground clearance, sweep step.
 - `CAMERA`, `AUTOPILOT`, `LOD_SPACING`, `LOD_RINGS`, `CHUNK_SIZE`, `FAR_TILE_*`, `DAY_LENGTH_SECONDS`, `SHOWCASE_SEED`, `WORLD_GEN_VERSION` (bump it when generation changes so old saves are not restored at a wrong place).
 
-Settings (bird species, wildlife density, quality, invert vertical, sensitivity, reduced motion, master/nature/music/effects volume and mute, dynamic resolution, dev overlay, day/night cycle) live in the in-game Settings panel and persist in `localStorage`. Dynamic resolution only changes the render pixel ratio, never geography or physics.
+Settings (bird species, music style, ambient life density, changing skies, quality, invert vertical, sensitivity, reduced motion, master/nature/music/effects volume and mute, dynamic resolution, dev overlay, day/night cycle) live in the in-game Settings panel and persist in `localStorage`. Dynamic resolution only changes the render pixel ratio, never geography or physics.
 
 ## Persistence
 
@@ -160,20 +161,21 @@ The app uses module workers (`type: 'module'`), which every current browser supp
 
 ## Verification
 
-See [docs/VERIFICATION.md](docs/VERIFICATION.md) for the actual test output, screenshots and measured performance from the last check, including what could not be verified. The scenery and mouse-exploration overhaul, with before/after comparisons and like-for-like performance numbers, is documented in [docs/VISUAL_UPGRADE.md](docs/VISUAL_UPGRADE.md). The Settings repair, frame-pacing work, soundscape, bird species and ambient wildlife are documented in [docs/CHILL_UPDATE.md](docs/CHILL_UPDATE.md).
+See [docs/VERIFICATION.md](docs/VERIFICATION.md) for the actual test output, screenshots and measured performance from the last check, including what could not be verified. The scenery and mouse-exploration overhaul, with before/after comparisons and like-for-like performance numbers, is documented in [docs/VISUAL_UPGRADE.md](docs/VISUAL_UPGRADE.md). The Settings repair, frame-pacing work, soundscape, bird species and ambient wildlife are documented in [docs/CHILL_UPDATE.md](docs/CHILL_UPDATE.md); the procedural music, bird picker with rendered portraits and flight profiles, rebuilt bird models and the scenery additions (wildflowers, boulders, balloons, sailboats, changing skies) in [docs/CHEERFUL_UPDATE.md](docs/CHEERFUL_UPDATE.md).
 
 Performance note: on an integrated Intel GPU at 1080p the medium preset runs at ~44 fps with dynamic resolution disabled (60 fps on low); dynamic resolution (on by default) scales the render resolution to hold the frame budget.
 
 ## Limitations
 
 - Water is a single global level: no rivers, no elevated lakes yet.
+- The procedural music is composed from rules, not authored; it will not sound like a recorded soundtrack.
 - Full tree geometry switches to billboard impostors at the LOD1 boundary (~1 km) and impostors end at ~3.5 km; both transitions are pops softened by distance and fog, not cross-fades.
 - Cloud puffs are camera-facing sprites: convincing from below, beside and above, but a cloud seen from very close is a soft fade rather than a true volume.
 - Distant terrain (far shell) is coarse and deliberately sunk 14 m; where the detailed tier is still loading, the far shell shows through briefly.
 - Shadows cover a ±220 m box around the bird only.
 - WebGPU is not used; the renderer is WebGL2 only.
 - No gamepad support yet.
-- Ambient animals are low-poly instanced decorations on fixed paths, not autonomous creatures; there is no weather, photo mode or ring course.
+- Ambient animals, balloons and boats are low-poly instanced decorations on fixed circles, not autonomous agents; "changing skies" varies haze and cloud cover but there is no rain, wind field, photo mode or ring course.
 
 ## Attribution
 
