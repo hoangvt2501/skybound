@@ -174,6 +174,11 @@ export class Clouds {
   readonly group = new THREE.Group();
   readonly altitudes = [1050, 2800];
   private seed: number;
+  private lastUpload = -Infinity;
+  private uploadOriginX = NaN;
+  private uploadOriginZ = NaN;
+  private uploadCamera = new THREE.Vector3(Infinity, Infinity, Infinity);
+  private uploadMatrix = new THREE.Matrix4();
   private puffMesh: THREE.InstancedMesh;
   private puffMaterial: THREE.ShaderMaterial;
   private sprite: THREE.Texture;
@@ -273,6 +278,7 @@ export class Clouds {
 
   setBudget(maxPuffs: number): void {
     this.maxPuffs = Math.min(maxPuffs, this.puffMesh.instanceMatrix.count);
+    this.lastUpload = -Infinity;
   }
 
   private massFor(cx: number, cz: number): CloudMass | null {
@@ -327,6 +333,14 @@ export class Clouds {
     (this.puffMaterial.uniforms.uLit.value as THREE.Color).copy(lit);
     (this.puffMaterial.uniforms.uShade.value as THREE.Color).copy(shade);
 
+    // Color changes remain smooth; cloud geometry/order only needs 15 Hz.
+    // Force upload on rebasing/teleport so cached render-space positions stay valid.
+    if (time >= this.lastUpload && time - this.lastUpload < 1 / 15 &&
+        originX === this.uploadOriginX && originZ === this.uploadOriginZ &&
+        this.uploadCamera.distanceToSquared(cameraRender) < 2500) return;
+    this.lastUpload = time;
+    this.uploadOriginX = originX; this.uploadOriginZ = originZ;
+    this.uploadCamera.copy(cameraRender);
     // Gather visible masses around the camera (global coords).
     const camGX = cameraRender.x + originX, camGZ = cameraRender.z + originZ;
     const driftX = WIND.x * WIND_SPEED * time, driftZ = WIND.y * WIND_SPEED * time;
@@ -355,7 +369,7 @@ export class Clouds {
     // Back-to-front for alpha blending; keep within budget (drop the farthest).
     this.order.sort((a, b) => b.d - a.d);
     if (this.order.length > this.maxPuffs) this.order.splice(0, this.order.length - this.maxPuffs);
-    const m = new THREE.Matrix4();
+    const m = this.uploadMatrix;
     let i = 0;
     for (const e of this.order) {
       m.makeScale(e.puff.size, e.puff.size, e.puff.size);

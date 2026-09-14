@@ -60,12 +60,15 @@ export interface ChunkMeshData {
   minHeight: number;
   maxHeight: number;
   hasWater: boolean;
+  waterDepth: Float32Array;
+  waterExposure: Float32Array;
   /** Tree instances: [gx, gy, gz, species, scale, rotation] * n. */
   trees: Float32Array;
   /** Ground cover instances (LOD0 only): [gx, gy, gz, scale, rotation, kind] * n. */
   cover: Float32Array;
 }
 
+export const WATER_SEGMENTS = 48;
 export const TREE_STRIDE = 6;
 const SKIRT_DEPTH_FACTOR = 3;
 
@@ -203,12 +206,27 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
   const trees = lod <= VEGETATION_MAX_LOD ? buildVegetation(gen, cx, cz) : new Float32Array(0);
   const cover = lod === 0 && coverDensity > 0 ? buildGroundCover(gen, cx, cz, coverDensity) : new Float32Array(0);
 
+  const hasWater = minH < SEA_LEVEL + 1.5;
+  const waterDepth = new Float32Array(hasWater ? (WATER_SEGMENTS + 1) ** 2 : 0);
+  const waterExposure = new Float32Array(waterDepth.length);
+  if (hasWater) {
+    for (let j = 0; j <= WATER_SEGMENTS; j++) {
+      for (let i = 0; i <= WATER_SEGMENTS; i++) {
+        const x = i * CHUNK_SIZE / WATER_SEGMENTS, z = j * CHUNK_SIZE / WATER_SEGMENTS;
+        const index = j * (WATER_SEGMENTS + 1) + i;
+        waterDepth[index] = sampleHeightGrid(heights, segs, spacing, x, z);
+        const land = gen.sample(ox + x, oz + z, sample).land;
+        waterExposure[index] = Math.max(0, Math.min(1, (0.75 - land) * 2.5));
+      }
+    }
+  }
+
   return {
     cx, cz, lod,
     positions, normals, colors, aux, indices,
     heights, segments: segs, spacing,
     minHeight: minH, maxHeight: maxH,
-    hasWater: minH < SEA_LEVEL + 1.5,
+    hasWater, waterDepth, waterExposure,
     trees,
     cover,
   };

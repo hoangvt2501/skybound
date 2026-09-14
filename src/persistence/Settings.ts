@@ -2,10 +2,16 @@
  * User settings with validation and persistence.
  */
 import { STORAGE_KEYS, type QualityPreset } from '../core/config';
+import { isBirdSpecies, type BirdSpecies } from '../flight/BirdSpecies';
 import type { KeyValueStore } from './Storage';
 
 export interface Settings {
   quality: QualityPreset;
+  birdSpecies: BirdSpecies;
+  wildlife: 'off' | 'subtle' | 'lively';
+  ambienceVolume: number;
+  musicVolume: number;
+  effectsVolume: number;
   invertVertical: boolean;
   sensitivity: number;
   reducedMotion: boolean;
@@ -24,10 +30,15 @@ export function defaultSettings(): Settings {
   const reduce = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   return {
     quality: mobile ? 'low' : 'medium',
+    birdSpecies: 'eagle',
+    wildlife: 'subtle',
+    ambienceVolume: 0.55,
+    musicVolume: 0.2,
+    effectsVolume: 0.45,
     invertVertical: false,
     sensitivity: 1,
     reducedMotion: !!reduce,
-    volume: 0.6,
+    volume: 0.45,
     muted: false,
     showDevOverlay: false,
     dynamicResolution: true,
@@ -45,6 +56,11 @@ export function validateSettings(raw: unknown): Settings {
   const bool = (v: unknown, fallback: boolean) => (typeof v === 'boolean' ? v : fallback);
   return {
     quality: o.quality === 'low' || o.quality === 'medium' || o.quality === 'high' ? o.quality : d.quality,
+    birdSpecies: isBirdSpecies(o.birdSpecies) ? o.birdSpecies : d.birdSpecies,
+    wildlife: o.wildlife === 'off' || o.wildlife === 'subtle' || o.wildlife === 'lively' ? o.wildlife : d.wildlife,
+    ambienceVolume: num(o.ambienceVolume, 0, 1, d.ambienceVolume),
+    musicVolume: num(o.musicVolume, 0, 1, d.musicVolume),
+    effectsVolume: num(o.effectsVolume, 0, 1, d.effectsVolume),
     invertVertical: bool(o.invertVertical, d.invertVertical),
     sensitivity: num(o.sensitivity, 0.3, 2.5, d.sensitivity),
     reducedMotion: bool(o.reducedMotion, d.reducedMotion),

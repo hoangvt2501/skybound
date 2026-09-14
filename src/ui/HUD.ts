@@ -39,6 +39,7 @@ export class HUD {
   private resetBtn: HTMLButtonElement;
   private last: Partial<Record<string, string | number | boolean>> = {};
   /** Called when the on-screen "Reset view" button is pressed. */
+  onSettings: (() => void) | null = null;
   onResetView: (() => void) | null = null;
 
   /** Show the reset-view button only while a free-look orbit is active. */
@@ -69,11 +70,13 @@ export class HUD {
         </div>
         <div class="hud-boost" title="Boost (hold Shift)"><div class="hud-boost-fill"></div></div>
       </div>
+      <button class="hud-settings" type="button" aria-label="Settings">Settings</button>
       <div class="hud-time"></div>
       <div class="hud-toasts" aria-live="polite"></div>`;
     // The HUD must never intercept pointer/wheel events meant for the canvas.
     this.root.style.pointerEvents = 'none';
     container.appendChild(this.root);
+    this.root.querySelector('.hud-settings')!.addEventListener('click', () => this.onSettings?.());
     const q = <T extends HTMLElement>(s: string) => this.root.querySelector<T>(s)!;
     this.speedEl = q('.hud-speed');
     this.altEl = q('.hud-alt');

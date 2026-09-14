@@ -10,7 +10,7 @@ import {
 import type { WorkerResponse } from '../workers/terrain.worker';
 import { WorkerPool } from '../workers/WorkerPool';
 import { SPECIES_COLLIDER } from './biomes';
-import { chunkKey, COVER_STRIDE, sampleHeightGrid, TREE_STRIDE } from './chunkMesh';
+import { chunkKey, WATER_SEGMENTS, COVER_STRIDE, sampleHeightGrid, TREE_STRIDE } from './chunkMesh';
 import { hash2 } from './noise';
 import { IMPOSTOR_SIZE, type VegetationLibrary } from './Vegetation';
 import { createTerrainSample, type WorldGen } from './WorldGen';
@@ -81,6 +81,16 @@ function shareGeometry(base: THREE.BufferGeometry): THREE.BufferGeometry {
   return g;
 }
 
+export function disposeInstanceGeometry(geometry: THREE.BufferGeometry): void {
+  // Three deletes all attached attribute buffers on dispose. Detach borrowed
+  // attributes so evicting one chunk cannot invalidate every surviving tree.
+  for (const name of Object.keys(geometry.attributes)) {
+    if (!(geometry.attributes[name] instanceof THREE.InstancedBufferAttribute)) geometry.deleteAttribute(name);
+  }
+  geometry.setIndex(null);
+  geometry.dispose();
+}
+
 export class ChunkManager {
   readonly root: THREE.Group;
   private chunks = new Map<string, ChunkRecord>();
@@ -134,7 +144,7 @@ export class ChunkManager {
       }
     });
     // 48 segments (~10.7 m) so shoreline depth interpolation follows small ponds.
-    this.waterGeometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 48, 48);
+    this.waterGeometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, WATER_SEGMENTS, WATER_SEGMENTS);
     this.waterGeometry.rotateX(-Math.PI / 2);
     this.waterGeometry.translate(CHUNK_SIZE / 2, 0, CHUNK_SIZE / 2);
   }
@@ -171,7 +181,7 @@ export class ChunkManager {
         rec.lod = -1;
         rec.requestId = 0;
       }
-      this.pool.cancelWhere(() => true);
+      this.pool.cancelWhere(req => req.type === 'chunk');
     }
     this.lastPlayerChunk.cx = NaN;
   }
@@ -308,7 +318,11 @@ export class ChunkManager {
   private onResult(msg: WorkerResponse): void {
     // Defer GPU uploads to processInstalls() so a burst of results (start,
     // teleport, quality change) does not stall a single frame.
+    // Map tiles have their own consumer: never enqueue their pixel buffers here.
+    if (msg.type !== 'chunk' && msg.type !== 'far') return;
     this.installQueue.push(msg);
+    const rank = (m: WorkerResponse) => m.type === 'chunk' ? (this.chunks.get(chunkKey(m.cx, m.cz))?.ring ?? 1000) : 100;
+    this.installQueue.sort((a, b) => rank(a) - rank(b));
   }
 
   /**
@@ -399,18 +413,8 @@ export class ChunkManager {
 
     if (msg.hasWater) {
       const wg = this.waterGeometry.clone();
-      const pos = wg.attributes.position;
-      const depth = new Float32Array(pos.count);
-      const exposure = new Float32Array(pos.count);
-      const ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
-      for (let i = 0; i < pos.count; i++) {
-        depth[i] = sampleHeightGrid(msg.heights, msg.segments, msg.spacing, pos.getX(i), pos.getZ(i));
-        // Open sea (low land-ness) is exposed to wind and surf; inland lakes are calm.
-        const land = this.gen.sample(ox + pos.getX(i), oz + pos.getZ(i), this.sampleScratch).land;
-        exposure[i] = THREE.MathUtils.clamp((0.75 - land) * 2.5, 0, 1);
-      }
-      wg.setAttribute('depth', new THREE.BufferAttribute(depth, 1));
-      wg.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
+      wg.setAttribute('depth', new THREE.BufferAttribute(msg.waterDepth, 1));
+      wg.setAttribute('exposure', new THREE.BufferAttribute(msg.waterExposure, 1));
       const water = new THREE.Mesh(wg, this.waterMaterial);
       water.position.set(rec.cx * CHUNK_SIZE, SEA_LEVEL, rec.cz * CHUNK_SIZE);
       water.updateMatrix();
@@ -537,7 +541,7 @@ export class ChunkManager {
       this.root.remove(im);
       // The per-mesh geometry only holds instance attributes plus references
       // to shared buffers; disposing it frees the instance buffers.
-      im.geometry.dispose();
+      disposeInstanceGeometry(im.geometry);
       im.dispose();
     }
     this.treeCount -= rec.trees.length / TREE_STRIDE;

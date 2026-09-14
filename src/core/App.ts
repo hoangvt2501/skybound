@@ -10,6 +10,8 @@ import { DayCycle } from '../atmosphere/DayCycle';
 import { Sky } from '../atmosphere/Sky';
 import { WaterMaterial } from '../atmosphere/WaterMaterial';
 import { Autopilot } from '../flight/Autopilot';
+import { BIRD_SPECIES } from '../flight/BirdSpecies';
+import { Wildlife } from '../world/Wildlife';
 import { BirdModel } from '../flight/Bird';
 import { CameraRig } from '../flight/CameraRig';
 import { createFlightState, copyFlightState, emptyInput, FlightController, type FlightInput, type FlightState, type TerrainQuery, findSafeAirborne } from '../flight/FlightController';
@@ -75,6 +77,7 @@ export class App {
   private waterMat: WaterMaterial;
   private veg: VegetationLibrary;
   private bird: BirdModel;
+  private wildlife: Wildlife;
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
   private fog: THREE.Fog;
@@ -93,6 +96,7 @@ export class App {
   private store: KeyValueStore;
   private phase: Phase = 'loading';
   private phaseBeforeMap: Phase = 'flying';
+  private phaseBeforeSettings: Phase = 'start';
   private prevState: FlightState = createFlightState();
   private renderState: FlightState = createFlightState();
   private frameInput: FlightInput = emptyInput();
@@ -101,6 +105,7 @@ export class App {
   private simTime = 0;
   private wallTime = 0;
   private lastSave = 0;
+  private lastUiUpdate = -1;
   private saveDirty = false;
   private raf = 0;
   private frameEma = 16;
@@ -169,9 +174,11 @@ export class App {
     this.flight.onImpact = (speed, kind) => this.onImpact(speed, kind);
 
     // Bird & camera.
-    this.bird = new BirdModel();
+    this.bird = new BirdModel(this.settings.birdSpecies);
     this.bird.group.scale.setScalar(1.6);
     this.scene.add(this.bird.group);
+    this.wildlife = new Wildlife(this.gen, (x, z) => this.chunks.surfaceAt(x, z));
+    this.scene.add(this.wildlife.group);
     this.cameraRig = new CameraRig(this.camera, {
       surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
       forEachObstacleNear: (x, z, r, cb) => terrain.forEachObstacleNear(x, z, r, cb),
@@ -212,6 +219,7 @@ export class App {
     // Map & UI.
     this.tiles = new TileCache(this.chunks.workerPool);
     this.hud = new HUD(ui);
+    this.hud.onSettings = () => this.openSettings();
     this.hud.onResetView = () => this.cameraRig.resetView();
     this.minimap = new Minimap(ui, this.tiles, {
       getPlayer: () => ({ x: this.renderState.x, z: this.renderState.z, heading: this.renderState.heading }),
@@ -365,6 +373,9 @@ export class App {
   }
 
   private beginFlight(): void {
+    this.audio.setMix(this.settings);
+    this.audio.setVolume(this.settings.volume);
+    this.audio.setMuted(this.settings.muted);
     this.audio.start();
     this.audio.setVolume(this.settings.volume);
     this.audio.setMuted(this.settings.muted);
@@ -400,6 +411,7 @@ export class App {
   private loop = (now: number): void => {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.loop);
+    if (document.hidden) { this.lastFrame = now; return; }
     let dt = (now - this.lastFrame) / 1000;
     this.lastFrame = now;
     if (dt > 0.5) dt = 0.5;
@@ -417,11 +429,10 @@ export class App {
     this.handleActions();
 
     if (this.phase === 'flying' && !this.worldMap.isOpen) {
-      const steps = this.frozen ? 0 : this.clock.advance(dt);
-      if (steps > 0) copyFlightState(this.flight.state, this.prevState);
       const cam = this.input.takeCamera();
-      for (let i = 0; i < steps; i++) this.simStep();
-      this.interpolate(steps > 0 ? this.clock.alpha : 1);
+      if (!this.frozen) this.clock.run(dt, () => copyFlightState(this.flight.state, this.prevState), () => this.simStep());
+      // Render the last pair even on a zero-step frame (e.g. 144 Hz display).
+      this.interpolate(this.frozen ? 1 : this.clock.alpha);
       this.day.advance(dt);
       this.cameraRig.update(dt, this.renderState, cam);
       this.bird.update(dt, {
@@ -432,7 +443,11 @@ export class App {
         speed: this.flight.state.speed,
         brake: this.frameInput.brake,
       });
-      this.audio.update(dt, this.flight.state.speed, this.flight.state.flapping, this.flight.state.boosting, this.flight.state.boosting ? 1.35 : 1);
+      this.audio.update(dt, this.flight.state.speed, this.flight.state.flapping, this.flight.state.boosting, (this.flight.state.boosting ? 1.35 : 1) * BIRD_SPECIES[this.settings.birdSpecies].beat, {
+        aboveGround: this.flight.state.y - this.chunks.surfaceAt(this.flight.state.x, this.flight.state.z),
+        water: this.chunks.heightAt(this.flight.state.x, this.flight.state.z) < SEA_LEVEL,
+        daylight: Math.max(0, Math.sin((this.day.time - 0.25) * Math.PI * 2)),
+      });
     } else if (this.phase === 'start') {
       // Idle: gentle glide animation, camera slowly orbits.
       this.input.takeCamera();
@@ -445,7 +460,7 @@ export class App {
     }
 
     // Bounded GPU uploads of finished chunks/tiles each frame.
-    this.chunks.processInstalls(this.phase === 'flying' ? 4 : 12, this.phase === 'flying' ? 6 : 24);
+    this.chunks.processInstalls(this.phase === 'flying' ? 2 : 8, this.phase === 'flying' ? 2 : 12);
 
     if (this.worldMap.isOpen) {
       // Map covers the screen; skip the 3D render but keep streaming alive.
@@ -455,7 +470,10 @@ export class App {
 
     this.updateWorld(dt);
     this.render();
-    this.updateUI(dt);
+    if (this.wallTime - this.lastUiUpdate >= 0.1) {
+      this.lastUiUpdate = this.wallTime;
+      this.updateUI(dt);
+    }
     if (this.saveDirty && this.wallTime - this.lastSave > 5) this.save(false);
   };
 
@@ -505,6 +523,7 @@ export class App {
     this.chunks.update(s.x, s.z, fwdX, fwdZ, this.wallTime);
     this.landmarks.update(s.x, s.z, this.wallTime, this.quality.shadows);
     this.veg.update(this.simTime, 0.83, 0.56);
+    this.wildlife.update(this.simTime, r.x, r.y, r.z, this.origin.value.x, this.origin.value.z, this.settings.wildlife, this.settings.quality);
 
     // Bird transform (render space).
     const bx = r.x - this.origin.value.x, bz = r.z - this.origin.value.z;
@@ -757,9 +776,11 @@ export class App {
     this.pauseMenu.hide();
     this.settingsPanel.hide();
     this.phase = 'flying';
+    this.touch?.setVisible(true);
     this.input.blocked = false;
     this.input.clear();
     this.clock.reset();
+    copyFlightState(this.flight.state, this.prevState);
     this.lastFrame = performance.now();
     void this.audio.resume();
   }
@@ -770,7 +791,7 @@ export class App {
   }
 
   private openMap(): void {
-    if (this.worldMap.isOpen || this.phase === 'loading' || this.phase === 'start') return;
+    if (this.settingsPanel.visible || this.worldMap.isOpen || this.phase === 'loading' || this.phase === 'start') return;
     this.phaseBeforeMap = this.phase;
     this.input.clear();
     this.touch?.resetAll();
@@ -796,6 +817,7 @@ export class App {
       this.pauseMenu.show(`Seed ${this.seed}`);
     } else {
       this.clock.reset();
+      copyFlightState(this.flight.state, this.prevState);
       this.lastFrame = performance.now();
       void this.audio.resume();
     }
@@ -803,25 +825,38 @@ export class App {
   }
 
   private openSettings(): void {
+    if (this.settingsPanel.visible) return;
+    this.phaseBeforeSettings = this.phase;
+    this.pauseMenu.hide();
+    this.startScreen.root.inert = true;
+    this.pauseMenu.root.inert = true;
     this.settingsPanel.show(this.settings);
     this.input.clear();
+    this.touch?.resetAll();
     this.input.blocked = true;
+    this.touch?.setVisible(false);
     if (this.phase === 'flying') {
-      // Settings pause the flight like the menu does.
       this.phase = 'paused';
       void this.audio.suspend();
     }
   }
 
   private closeSettings(): void {
+    this.startScreen.root.inert = false;
+    this.pauseMenu.root.inert = false;
     this.settingsPanel.hide();
     saveSettings(this.store, this.settings);
-    if (this.phase === 'paused' && !this.pauseMenu.visible) this.resume();
-    else if (this.phase === 'start') this.input.blocked = false;
+    if (this.phaseBeforeSettings === 'flying') this.resume();
+    else if (this.phaseBeforeSettings === 'paused') {
+      this.pauseMenu.show(`Seed ${this.seed}`);
+      this.pauseMenu.root.querySelector<HTMLButtonElement>('[data-action="settings"]')?.focus();
+    } else this.input.blocked = false;
   }
 
   private applySettings(s: Settings): void {
     const prevQuality = this.settings.quality;
+    const prevSpecies = this.settings.birdSpecies;
+    const prevDynamic = this.settings.dynamicResolution;
     this.settings = s;
     saveSettings(this.store, s);
     this.input.sensitivity = s.sensitivity;
@@ -830,9 +865,20 @@ export class App {
     this.cameraRig.autoCenter = s.autoCenterCamera;
     this.audio.setVolume(s.volume);
     this.audio.setMuted(s.muted);
+    this.audio.setMix(s);
+    if (s.birdSpecies !== prevSpecies) {
+      const next = new BirdModel(s.birdSpecies);
+      next.group.position.copy(this.bird.group.position);
+      next.group.quaternion.copy(this.bird.group.quaternion);
+      next.group.scale.copy(this.bird.group.scale);
+      this.scene.remove(this.bird.group);
+      this.bird.dispose();
+      this.bird = next;
+      this.scene.add(next.group);
+    }
     this.dev.setVisible(s.showDevOverlay);
     if (s.quality !== prevQuality) this.applyQuality(QUALITY_PRESETS[s.quality]);
-    if (!s.dynamicResolution) {
+    if (!s.dynamicResolution && (prevDynamic || s.quality !== prevQuality)) {
       this.pixelRatio = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
       this.renderer.setPixelRatio(this.pixelRatio);
       this.onResize();
@@ -974,6 +1020,9 @@ export class App {
       mapOpen: () => this.worldMap.isOpen,
       inputSnapshot: () => ({ dragging: this.input.isDragging, pitch: this.frameInput.pitch, turn: this.frameInput.turn, flap: this.frameInput.flap, boost: this.frameInput.boost, blocked: this.input.blocked }),
       quality: () => this.settings.quality,
+      birdSpecies: () => this.bird.species,
+      wildlife: () => this.wildlife.counts(),
+      settingsVisible: () => this.settingsPanel.visible,
     };
   }
 
@@ -993,6 +1042,7 @@ export class App {
     this.sky.dispose();
     this.clouds.dispose();
     this.bird.dispose();
+    this.wildlife.dispose();
     this.audio.dispose();
     this.renderer.dispose();
   }

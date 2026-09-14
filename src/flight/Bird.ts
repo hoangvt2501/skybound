@@ -4,6 +4,7 @@
  * -Z, up is +Y, right wing is +X.
  */
 import * as THREE from 'three';
+import { BIRD_SPECIES, type BirdSpecies } from './BirdSpecies';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export interface BirdPose {
@@ -80,7 +81,7 @@ function wingPanel(length: number, rootChord: number, tipChord: number, sweep: n
 }
 
 /** A single primary feather: thin tapered slab along +X. */
-function feather(length: number, width: number, c: THREE.Color): THREE.BufferGeometry {
+function feather(length: number, width: number, c: THREE.Color, under = COL_WING_UNDER): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(length, 0.014, width, 1, 1, 1);
   const pos = g.attributes.position;
   for (let i = 0; i < pos.count; i++) {
@@ -89,7 +90,7 @@ function feather(length: number, width: number, c: THREE.Color): THREE.BufferGeo
     pos.setXYZ(i, x, pos.getY(i), pos.getZ(i) * (1 - 0.6 * t));
   }
   pos.needsUpdate = true;
-  return paintTwoTone(g, c, c.clone().lerp(COL_WING_UNDER, 0.55));
+  return paintTwoTone(g, c, c.clone().lerp(under, 0.55));
 }
 
 export class BirdModel {
@@ -107,7 +108,17 @@ export class BirdModel {
   /** Wingspan (m) tip to tip at full extension. */
   readonly wingspan: number;
 
-  constructor() {
+  readonly species: BirdSpecies;
+  private beatMultiplier = 1;
+
+  constructor(species: BirdSpecies = 'eagle') {
+    this.species = species;
+    const style = BIRD_SPECIES[species];
+    this.beatMultiplier = style.beat;
+    const COL_BACK = new THREE.Color(style.back), COL_BELLY = new THREE.Color(style.belly);
+    const COL_WING_TOP = new THREE.Color(style.wing), COL_WING_UNDER = new THREE.Color(style.under);
+    const COL_PRIMARY = new THREE.Color(style.primary), COL_HEAD = new THREE.Color(style.face);
+    const COL_BEAK = new THREE.Color(style.beak), COL_TAIL = COL_WING_TOP, COL_TAIL_TIP = COL_BELLY;
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
     const mat = this.material;
 
@@ -125,6 +136,7 @@ export class BirdModel {
     }
     paintTwoTone(bodyGeo, COL_BACK, COL_BELLY);
     this.body = new THREE.Mesh(bodyGeo, mat);
+    this.body.scale.set(style.body, style.body, style.body);
     this.group.add(this.body);
 
     // Head group.
@@ -143,6 +155,18 @@ export class BirdModel {
       eye.position.set(sx * 0.085, 0.03, -0.07);
       this.head.add(eye);
     }
+    this.head.scale.setScalar(style.head);
+    if (species === 'owl') {
+      for (const side of [-1, 1]) {
+        const disc = new THREE.Mesh(paintFlat(new THREE.SphereGeometry(0.065, 12, 8), COL_BELLY), mat);
+        disc.position.set(side * 0.055, 0.015, -0.1);
+        disc.scale.set(1, 1.15, 0.35);
+        this.head.add(disc);
+        const eye = new THREE.Mesh(paintFlat(new THREE.SphereGeometry(0.02, 8, 6), COL_EYE), mat);
+        eye.position.set(side * 0.055, 0.025, -0.13);
+        this.head.add(eye);
+      }
+    }
     this.group.add(this.head);
 
     // Wings: three hinged segments each. Segment lengths (m).
@@ -151,6 +175,7 @@ export class BirdModel {
       { len: 0.40, root: 0.30, tip: 0.24, sweep: 0.06 },
       { len: 0.38, root: 0.24, tip: 0.10, sweep: 0.14 },
     ];
+    for (const seg of segs) { seg.len *= style.span; seg.root *= style.chord; seg.tip *= style.chord; if (style.fork) seg.sweep *= 2; }
     this.wingspan = 2 * (segs[0].len + segs[1].len + segs[2].len) + 0.3;
     for (const side of [-1, 1] as const) {
       const chain: THREE.Group[] = [];
@@ -169,7 +194,7 @@ export class BirdModel {
             [0.34, 0.09, 0.05], [0.4, 0.085, 0.17], [0.42, 0.08, 0.3], [0.38, 0.075, 0.44], [0.32, 0.07, 0.58],
           ];
           for (const [len, w, zOff] of feathers) {
-            const f = new THREE.Mesh(feather(len, w, COL_PRIMARY), mat);
+            const f = new THREE.Mesh(feather(len * style.span, w * style.chord, COL_PRIMARY, COL_WING_UNDER), mat);
             f.position.set(side * (s.len - 0.12), 0.004, s.tip * 0.5 + zOff * 0.2 + 0.02);
             f.rotation.y = -side * (zOff * 1.3 - 0.25);
             if (side < 0) f.scale.x = -1;
@@ -190,12 +215,14 @@ export class BirdModel {
     // Tail: fan of feathers pivoting at the body rear.
     this.tail = new THREE.Group();
     this.tail.position.set(0, 0.01, 0.4);
-    const tailCount = 7;
+    const tailCount = style.fork ? 6 : 7;
     for (let i = 0; i < tailCount; i++) {
       const t = (i / (tailCount - 1)) * 2 - 1;
       const fg = new THREE.Group();
       const f = new THREE.Mesh(paintTwoTone(new THREE.BoxGeometry(0.075, 0.012, 0.36), COL_TAIL, COL_TAIL_TIP), mat);
-      f.position.set(0, 0, 0.18);
+      const tailLength = style.tail * (style.fork ? 0.3 + Math.abs(t) * 0.9 : 1);
+      f.scale.z = tailLength;
+      f.position.set(0, 0, 0.18 * tailLength);
       fg.add(f);
       fg.rotation.y = -t * 0.32;
       fg.userData.base = fg.rotation.y;
@@ -212,7 +239,7 @@ export class BirdModel {
     this.flapSmooth += (pose.flap - this.flapSmooth) * k;
     const flap = this.flapSmooth;
     // Wingbeat: fast while flapping, an occasional slow beat while gliding.
-    const freq = THREE.MathUtils.lerp(0.35, 3.1 * pose.beatRate, flap);
+    const freq = THREE.MathUtils.lerp(0.35, 3.1 * pose.beatRate * this.beatMultiplier, flap);
     this.phase += dt * freq * Math.PI * 2;
     if (this.phase > Math.PI * 2000) this.phase -= Math.PI * 2000;
     this.glideBob += dt;
@@ -272,6 +299,7 @@ export function buildStaticBirdGeometry(): THREE.BufferGeometry {
     }
   });
   const merged = mergeGeometries(parts, false)!;
+  for (const part of parts) part.dispose();
   model.dispose();
   return merged;
 }

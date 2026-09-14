@@ -5,3 +5,6 @@ test-results/
 e2e/.artifacts/
 *.log
 .DS_Store
+
+# Downloaded update packages
+*.zip

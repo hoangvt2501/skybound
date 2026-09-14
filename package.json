@@ -21,6 +21,7 @@
     "@playwright/test": "1.63.0",
     "@types/node": "26.5.1",
     "@types/three": "0.186.0",
+    "happy-dom": "20.14.5",
     "typescript": "5.9.3",
     "vite": "7.3.6",
     "vitest": "4.1.11"

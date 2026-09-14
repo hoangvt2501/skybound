@@ -47,7 +47,8 @@ Open `?seed=<number or text>` to fly a specific world. `?seed=…&fresh=1` disca
 | **M** | World map (pauses the flight) |
 | **R** | Recover to a validated safe airborne position nearby |
 | **H** | Controls help |
-| **Esc** | Close the active overlay, otherwise pause/resume |
+| **Esc** | Close the active overlay (map, help, Settings), otherwise pause/resume |
+| **Settings** button (bottom-left) | Open Settings during flight; the flight pauses and resumes when it closes |
 | **F3** | Developer overlay |
 
 No input = the bird keeps gliding with gentle drag and slow altitude loss. Diving gains speed; climbing costs it.
@@ -58,13 +59,17 @@ No input = the bird keeps gliding with gentle drag and slow altitude loss. Divin
 
 Settings has an **Auto-center camera** toggle (off by default) that eases the view back behind the bird after a short idle time.
 
+**Settings** (from the start screen, the pause menu or the in-flight button) is a scrollable dialog that always sits above the other overlays: it takes focus when it opens, Tab stays inside it, Esc closes it and focus returns to the control that opened it. It holds the bird choice (**Eagle**, **Gull**, **Swallow**, **Owl**: different silhouettes, colours and wingbeat rhythm, same controls), the soundscape mixer (master, nature & wind, gentle music, wings & discoveries, mute) and the ambient wildlife density (**Off**, **Subtle**, **Lively**).
+
 ## What is in the world
 
 - A 32 km × 32 km curated region (an island continent) centered on the origin, with deterministic terrain continuing beyond it (outer continents and islands).
 - Six biome families with smooth transitions driven by elevation, temperature, moisture and shoreline distance: temperate forest & meadow, alpine mountains with elevation-based snow, coast/ocean/islands, arid plateau & canyons, wetlands & lakes, flowering uplands.
 - 15 deterministic landmarks of 8 types (stone arch, lighthouse, cliffside ruins, giant tree, mountain shrine, canyon bridge, standing stones, watchtower), each with a stable id, name, position, colliders and a discovery radius. Discovery adds them to the journal and the map.
 - Water at global sea level (lakes are inland basins below sea level, coast and islands). Rivers are intentionally not shipped: coastlines and lakes first.
-- Day/night cycle with sun, moon and stars, cumulus clusters built from sorted billboard puffs (lit tops, shaded undersides) under a thin cirrus sheet, distance fog matched to the sky, animated water with surf only on exposed shores and calm lakes, Web Audio wind and wingbeats.
+- Day/night cycle with sun, moon and stars, cumulus clusters built from sorted billboard puffs (lit tops, shaded undersides) under a thin cirrus sheet, distance fog matched to the sky, animated water with surf only on exposed shores and calm lakes.
+- A procedural Web Audio soundscape with separate buses: filtered, gentle wind that stays bounded while boosting, soft wingbeats, water that fades in near shores and lakes, sparse daytime birdsong, and a quiet slowly-changing pad of chords. No audio files are shipped.
+- Ambient wildlife: small flocks circling over the land, deer resting in meadows and uplands, ducks swimming on ponds. Encounters are deterministic per seed, prepared one habitat per frame, purely decorative (no colliders), and capped per density setting.
 - Terrain shading is procedural per pixel: rock on steep faces with strata and cracks, snow that collects on shelves, wet banks, distance-aware grain. Trees have trunks, branches and layered crowns near the camera, billboard impostors further out, and grass tufts in the near field; trees are placed at a fixed density on every preset so collision is identical.
 
 Every seed gives a different island with the same geographic structure (a mountain spine, an arid quarter, a wetland coast, an upland quarter), so all six biomes are always reachable. The showcase seed is `1207`.
@@ -133,7 +138,7 @@ Everything tunable is in `src/core/config.ts`:
 - `FLIGHT`: cruise/max/boost speeds, drag, gravity gain, pitch/turn/bank rates, boost capacity and recovery, ground clearance, sweep step.
 - `CAMERA`, `AUTOPILOT`, `LOD_SPACING`, `LOD_RINGS`, `CHUNK_SIZE`, `FAR_TILE_*`, `DAY_LENGTH_SECONDS`, `SHOWCASE_SEED`, `WORLD_GEN_VERSION` (bump it when generation changes so old saves are not restored at a wrong place).
 
-Settings (quality, invert vertical, sensitivity, reduced motion, volume/mute, dynamic resolution, dev overlay, day/night cycle) live in the in-game Settings panel and persist in `localStorage`. Dynamic resolution only changes the render pixel ratio, never geography or physics.
+Settings (bird species, wildlife density, quality, invert vertical, sensitivity, reduced motion, master/nature/music/effects volume and mute, dynamic resolution, dev overlay, day/night cycle) live in the in-game Settings panel and persist in `localStorage`. Dynamic resolution only changes the render pixel ratio, never geography or physics.
 
 ## Persistence
 
@@ -155,7 +160,7 @@ The app uses module workers (`type: 'module'`), which every current browser supp
 
 ## Verification
 
-See [docs/VERIFICATION.md](docs/VERIFICATION.md) for the actual test output, screenshots and measured performance from the last check, including what could not be verified. The scenery and mouse-exploration overhaul, with before/after comparisons and like-for-like performance numbers, is documented in [docs/VISUAL_UPGRADE.md](docs/VISUAL_UPGRADE.md).
+See [docs/VERIFICATION.md](docs/VERIFICATION.md) for the actual test output, screenshots and measured performance from the last check, including what could not be verified. The scenery and mouse-exploration overhaul, with before/after comparisons and like-for-like performance numbers, is documented in [docs/VISUAL_UPGRADE.md](docs/VISUAL_UPGRADE.md). The Settings repair, frame-pacing work, soundscape, bird species and ambient wildlife are documented in [docs/CHILL_UPDATE.md](docs/CHILL_UPDATE.md).
 
 Performance note: on an integrated Intel GPU at 1080p the medium preset runs at ~44 fps with dynamic resolution disabled (60 fps on low); dynamic resolution (on by default) scales the render resolution to hold the frame budget.
 
@@ -168,7 +173,7 @@ Performance note: on an integrated Intel GPU at 1080p the medium preset runs at 
 - Shadows cover a ±220 m box around the bird only.
 - WebGPU is not used; the renderer is WebGL2 only.
 - No gamepad support yet.
-- Optional extensions (other species, flocks, weather, photo mode, rings) are not included.
+- Ambient animals are low-poly instanced decorations on fixed paths, not autonomous creatures; there is no weather, photo mode or ring course.
 
 ## Attribution
 

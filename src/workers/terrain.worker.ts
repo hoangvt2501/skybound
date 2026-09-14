@@ -32,6 +32,8 @@ export type WorkerResponse =
       minHeight: number;
       maxHeight: number;
       hasWater: boolean;
+      waterDepth: Float32Array;
+      waterExposure: Float32Array;
       trees: Float32Array;
       cover: Float32Array;
     }
@@ -79,10 +81,12 @@ ctx.onmessage = (e: MessageEvent<WorkerRequest>) => {
         minHeight: m.minHeight,
         maxHeight: m.maxHeight,
         hasWater: m.hasWater,
+        waterDepth: m.waterDepth,
+        waterExposure: m.waterExposure,
         trees: m.trees,
         cover: m.cover,
       },
-      [m.positions.buffer, m.normals.buffer, m.colors.buffer, m.aux.buffer, m.indices.buffer, m.heights.buffer, m.trees.buffer, m.cover.buffer],
+      [m.positions.buffer, m.normals.buffer, m.colors.buffer, m.aux.buffer, m.indices.buffer, m.heights.buffer, m.trees.buffer, m.cover.buffer, m.waterDepth.buffer, m.waterExposure.buffer],
     );
   } else if (msg.type === 'far') {
     const m = buildFarTile(gen, msg.tx, msg.tz);

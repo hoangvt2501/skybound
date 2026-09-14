@@ -210,3 +210,30 @@ body.has-touch.hud-toasts { top: 170px; }
   .minimap { bottom: 12px; }
   .touch-right { bottom: 30px; }
 }
+
+/* Settings owns its stacking context above start, pause and diagnostics. */
+.overlay.settings { z-index: 60; padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); }
+.settings-card { width: 680px; min-width: 0; max-width: 100%; max-height: calc(100dvh - 32px); padding: 0; display: flex; flex-direction: column; overflow: hidden; color-scheme: dark; }
+.settings-header, .settings-footer { flex-shrink: 0; padding: 18px 22px; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.settings-header { border-bottom: 1px solid var(--ui-border); }
+.settings-header h2 { font-size: 21px; }
+.settings-header p { margin: 4px 0 0; }
+.settings-footer { border-top: 1px solid var(--ui-border); }
+.settings-body { padding: 4px 22px 18px; overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.settings-body fieldset { min-width: 0; border: 0; padding: 16px 0; margin: 0; border-bottom: 1px solid var(--ui-border); }
+.settings-body legend { padding: 12px 0 0; font-size: 14px; font-weight: 600; color: var(--accent); }
+.settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settings-grid label { min-width: 0; line-height: 1.5; }
+.settings-grid select { min-height: 42px; background: #182a36; }
+.settings-grid option { background: #182a36; color: #eef3f6; }
+.settings-grid input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; accent-color: var(--accent); }
+.settings-grid input[type="range"] { accent-color: var(--accent); min-width: 0; min-height: 28px; }
+.settings-range { display: flex; align-items: center; gap: 12px; }
+.settings-range output { min-width: 38px; font-size: 12px; color: var(--ui-muted); text-align: right; }
+.settings-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.settings-body details { padding-top: 14px; }
+.settings :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+.bird-description { align-self: center; margin: 0; }
+@media (max-width: 560px) { .settings-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; } .settings-header, .settings-footer { padding: 14px 16px; } .settings-body { padding: 0 16px 16px; } .settings-header h2 { font-size: 18px; } }
+.hud-settings { position: absolute; left: 14px; bottom: 44px; pointer-events: auto; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-bg-strong); color: var(--ui-text); padding: 9px 14px; cursor: pointer; min-height: 40px; }
+body.has-touch .hud-settings { left: auto; right: 14px; top: 64px; bottom: auto; }

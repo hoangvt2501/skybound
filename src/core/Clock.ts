@@ -44,6 +44,13 @@ export class FixedStepClock {
     return n;
   }
 
+  /** Capture a fresh previous state before EACH step, including catch-up frames. */
+  run(frameDt: number, beforeStep: () => void, simulate: () => void): number {
+    const count = this.advance(frameDt);
+    for (let i = 0; i < count; i++) { beforeStep(); simulate(); }
+    return count;
+  }
+
   /** Interpolation factor between the previous and current sim state. */
   get alpha(): number {
     return this.accumulator / this.step;
