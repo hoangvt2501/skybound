@@ -1,0 +1,156 @@
+/**
+ * Central tuning for SKYBOUND. Everything that designers might want to tweak
+ * lives here so gameplay feel, world scale and streaming budgets are adjusted
+ * in one place.
+ */
+
+export const WORLD_GEN_VERSION = 3;
+export const SAVE_VERSION = 1;
+export const SHOWCASE_SEED = 1207;
+
+/** Curated region is 32 km x 32 km centered on the origin. */
+export const REGION_HALF_SIZE = 16000;
+export const SEA_LEVEL = 0;
+
+export const CHUNK_SIZE = 512;
+/** Vertex spacing (m) per LOD level. LOD0 is nearest. */
+export const LOD_SPACING = [4, 8, 16, 32] as const;
+/** Chebyshev chunk-ring at which each LOD begins. */
+export const LOD_RINGS = [0, 2, 4, 7] as const;
+/** Vegetation is generated for chunks up to this LOD (inclusive). */
+export const VEGETATION_MAX_LOD = 1;
+
+/** Far tier: coarse shell tiles beyond the detailed chunk radius. */
+export const FAR_TILE_SIZE = 4096;
+export const FAR_TILE_SEGMENTS = 64;
+export const FAR_TILE_Y_OFFSET = -14;
+
+export type QualityPreset = 'low' | 'medium' | 'high';
+
+export interface QualitySettings {
+  /** Detailed chunk radius in chunks (Chebyshev). */
+  chunkRadius: number;
+  /** Far shell radius in far tiles (0 disables). */
+  farRadius: number;
+  /** Multiplier on vegetation density. */
+  vegetationDensity: number;
+  shadows: boolean;
+  clouds: boolean;
+  maxPixelRatio: number;
+  /** Fog visibility distance in meters (fog reaches ~full opacity here). */
+  fogFar: number;
+  /** Max terrain generation jobs in flight. */
+  maxJobs: number;
+}
+
+export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
+  low: {
+    chunkRadius: 5,
+    farRadius: 2,
+    vegetationDensity: 0.45,
+    shadows: false,
+    clouds: true,
+    maxPixelRatio: 1,
+    fogFar: 4200,
+    maxJobs: 2,
+  },
+  medium: {
+    chunkRadius: 7,
+    farRadius: 3,
+    vegetationDensity: 0.8,
+    shadows: true,
+    clouds: true,
+    maxPixelRatio: 1.5,
+    fogFar: 6200,
+    maxJobs: 3,
+  },
+  high: {
+    chunkRadius: 10,
+    farRadius: 4,
+    vegetationDensity: 1,
+    shadows: true,
+    clouds: true,
+    maxPixelRatio: 2,
+    fogFar: 8600,
+    maxJobs: 4,
+  },
+};
+
+/** Fixed simulation step and catch-up limits. */
+export const SIM_STEP = 1 / 60;
+export const SIM_MAX_STEPS_PER_FRAME = 6;
+export const SIM_MAX_ACCUMULATED = 0.25;
+
+/** Arcade flight tuning. Units are meters, seconds and radians. */
+export const FLIGHT = {
+  cruiseSpeed: 34,
+  minSpeed: 14,
+  maxSpeed: 58,
+  boostMaxSpeed: 82,
+  boostAccel: 26,
+  flapAccel: 12,
+  flapLift: 7.5,
+  /** Speed regained per second toward cruise when below it. */
+  accelToCruise: 8,
+  /** Fraction of excess speed shed per second. */
+  drag: 0.55,
+  gravityGain: 9.0,
+  climbSpeedCost: 6.5,
+  maxPitch: 0.62,
+  minPitch: -0.85,
+  glidePitch: -0.045,
+  pitchRate: 1.9,
+  pitchReturnRate: 1.1,
+  maxTurnRate: 1.35,
+  turnResponse: 3.2,
+  maxBank: 1.05,
+  bankResponse: 3.4,
+  flapPitchBoost: 0.28,
+  boostCapacity: 100,
+  boostDrain: 34,
+  boostRecovery: 16,
+  boostRecoveryDelay: 1.2,
+  boostMinToStart: 15,
+  groundClearance: 1.6,
+  impactSpeedFactor: 0.45,
+  impactCooldown: 1.0,
+  maxAltitude: 2600,
+  /** Sim substep length for swept collision (m). */
+  sweepStep: 6,
+} as const;
+
+export const CAMERA = {
+  chase: { distance: 16, height: 5, lookAhead: 14, fov: 62 },
+  cinematic: { distance: 34, height: 10, lookAhead: 32, fov: 50 },
+  minDistance: 6,
+  maxDistance: 45,
+  positionSmoothing: 6,
+  lookSmoothing: 8,
+  rollFollow: 0.28,
+  minClearance: 2.2,
+  orbitReturnDelay: 1.6,
+  orbitReturnRate: 2.4,
+} as const;
+
+export const AUTOPILOT = {
+  lookAheadNear: 480,
+  lookAheadFar: 2000,
+  cruiseAboveGround: 95,
+  minAboveGround: 40,
+  turnGain: 0.9,
+  maxTurnInput: 0.75,
+  arriveRadius: 130,
+  loiterRadius: 210,
+  wanderPeriod: 47,
+} as const;
+
+export const WAYPOINT_ARRIVE_RADIUS = 110;
+export const LANDMARK_DISCOVERY_RADIUS = 260;
+export const EXPLORE_CELL_SIZE = 500;
+
+export const DAY_LENGTH_SECONDS = 720;
+
+export const STORAGE_KEYS = {
+  save: 'skybound.save.v1',
+  settings: 'skybound.settings.v1',
+} as const;

@@ -1,0 +1,160 @@
+{
+  "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 770 (0x00004680) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "quality": "medium",
+  "samples": [
+    {
+      "t": 6.715099999964237,
+      "fps": 60.03098373353983,
+      "frameMs": 16.673985030184216,
+      "info": {
+        "calls": 198,
+        "triangles": 1707057
+      },
+      "chunks": {
+        "loaded": 178,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 48,
+        "triangles": 1306112,
+        "trees": 9247
+      },
+      "x": -4633,
+      "z": 7005,
+      "y": 190,
+      "heap": 52.36107158660889,
+      "status": "enroute"
+    },
+    {
+      "t": 8.722699999988079,
+      "fps": 56.136275648470715,
+      "frameMs": 17.29192358587379,
+      "info": {
+        "calls": 211,
+        "triangles": 2031454
+      },
+      "chunks": {
+        "loaded": 181,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 49,
+        "triangles": 1449600,
+        "trees": 11016
+      },
+      "x": -4588,
+      "z": 6950,
+      "y": 154,
+      "heap": 61.87743091583252,
+      "status": "enroute"
+    },
+    {
+      "t": 10.732699999988078,
+      "fps": 58.08325266214906,
+      "frameMs": 18.262241596720408,
+      "info": {
+        "calls": 211,
+        "triangles": 1999722
+      },
+      "chunks": {
+        "loaded": 185,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 49,
+        "triangles": 1453824,
+        "trees": 11016
+      },
+      "x": -4541,
+      "z": 6892,
+      "y": 122,
+      "heap": 58.31561088562012,
+      "status": "enroute"
+    },
+    {
+      "t": 12.74430000001192,
+      "fps": 56.136275648470715,
+      "frameMs": 17.787615988002425,
+      "info": {
+        "calls": 212,
+        "triangles": 2030451
+      },
+      "chunks": {
+        "loaded": 186,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 49,
+        "triangles": 1456128,
+        "trees": 11016
+      },
+      "x": -4493,
+      "z": 6833,
+      "y": 111,
+      "heap": 60.89736080169678,
+      "status": "enroute"
+    },
+    {
+      "t": 14.747800000011921,
+      "fps": 58.13953488372104,
+      "frameMs": 18.620792440758954,
+      "info": {
+        "calls": 213,
+        "triangles": 2064585
+      },
+      "chunks": {
+        "loaded": 190,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 49,
+        "triangles": 1462016,
+        "trees": 11016
+      },
+      "x": -4447,
+      "z": 6777,
+      "y": 110,
+      "heap": 64.03056621551514,
+      "status": "enroute"
+    },
+    {
+      "t": 16.75839999997616,
+      "fps": 55.97760895641755,
+      "frameMs": 18.313414979561344,
+      "info": {
+        "calls": 208,
+        "triangles": 2014735
+      },
+      "chunks": {
+        "loaded": 191,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 49,
+        "triangles": 1462656,
+        "trees": 11016
+      },
+      "x": -4402,
+      "z": 6722,
+      "y": 110,
+      "heap": 60.29825782775879,
+      "status": "enroute"
+    },
+    {
+      "t": 18.772699999988077,
+      "fps": 58.06077027288554,
+      "frameMs": 16.71109264640723,
+      "info": {
+        "calls": 207,
+        "triangles": 2017739
+      },
+      "chunks": {
+        "loaded": 194,
+        "pending": 0,
+        "queued": 0,
+        "farLoaded": 49,
+        "triangles": 1467904,
+        "trees": 11016
+      },
+      "x": -4359,
+      "z": 6669,
+      "y": 111,
+      "heap": 62.25545787811279,
+      "status": "enroute"
+    }
+  ]
+}

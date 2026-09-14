@@ -1,0 +1,32 @@
+{
+  "name": "skybound",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SKYBOUND - a browser-based 3D bird-flight exploration experience",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "three": "0.186.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.5.1",
+    "@types/three": "0.186.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
