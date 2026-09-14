@@ -1,5 +1,7 @@
 # SKYBOUND
 
+**Play it: [hoangvt2501.github.io/skybound](https://hoangvt2501.github.io/skybound/)** · Source: [github.com/hoangvt2501/skybound](https://github.com/hoangvt2501/skybound)
+
 A browser-based 3D bird-flight exploration game. Take off, steer a bird with real inertia and banked turns over a 32 km × 32 km hand-shaped procedural region, discover landmarks, open a real map, set a waypoint and fly there. Or switch on autopilot and just watch.
 
 Built with TypeScript, Vite and Three.js (WebGL2). No accounts, no backend, no external assets: every mountain, lake, tree, landmark and sound is generated on your machine from a seed.
@@ -63,7 +65,7 @@ Every seed gives a different island with the same geographic structure (a mounta
 
 ## Architecture
 
-```
+```text
 src/
   main.ts                 boot: WebGL2 check, URL seed, save/settings load, App
   core/
