@@ -13,6 +13,7 @@ export type Action =
   | 'toggleHelp'
   | 'escape'
   | 'cycleCamera'
+  | 'resetView'
   | 'togglePause'
   | 'toggleDev';
 
@@ -76,6 +77,7 @@ export class InputManager {
       case 'KeyR': this.actions.push('recover'); break;
       case 'KeyH': this.actions.push('toggleHelp'); break;
       case 'KeyC': this.actions.push('cycleCamera'); break;
+      case 'KeyV': this.actions.push('resetView'); break;
       case 'KeyP': this.actions.push('togglePause'); break;
       case 'F3': this.actions.push('toggleDev'); e.preventDefault(); break;
       case 'Escape': this.actions.push('escape'); break;
@@ -126,10 +128,21 @@ export class InputManager {
     this.camera.zoom += delta;
   }
 
-  /** Clear all held keys and drags. */
+  /** True while a mouse camera drag is in progress. */
+  get isDragging(): boolean {
+    return this.camera.dragging;
+  }
+
+  /** Clear all held keys, drags and pending camera deltas. */
   clear(): void {
     this.keys.clear();
     this.camera.dragging = false;
+    this.camera.orbitYaw = 0;
+    this.camera.orbitPitch = 0;
+    this.camera.zoom = 0;
+    if (this.pointerId !== null) {
+      try { this.canvas.releasePointerCapture(this.pointerId); } catch { /* ignore */ }
+    }
     this.pointerId = null;
     this.touch.turn = 0;
     this.touch.pitch = 0;

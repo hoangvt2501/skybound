@@ -15,6 +15,8 @@ export interface Settings {
   dynamicResolution: boolean;
   minimapZoom: number;
   helpSeen: boolean;
+  /** Ease the camera back behind the bird after an idle delay (default off). */
+  autoCenterCamera: boolean;
 }
 
 export function defaultSettings(): Settings {
@@ -31,6 +33,7 @@ export function defaultSettings(): Settings {
     dynamicResolution: true,
     minimapZoom: 1,
     helpSeen: false,
+    autoCenterCamera: false,
   };
 }
 
@@ -51,6 +54,7 @@ export function validateSettings(raw: unknown): Settings {
     dynamicResolution: bool(o.dynamicResolution, d.dynamicResolution),
     minimapZoom: num(o.minimapZoom, 0, 3, d.minimapZoom),
     helpSeen: bool(o.helpSeen, d.helpSeen),
+    autoCenterCamera: bool(o.autoCenterCamera, d.autoCenterCamera),
   };
 }
 

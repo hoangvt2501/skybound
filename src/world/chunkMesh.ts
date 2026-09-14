@@ -6,6 +6,22 @@ import { CHUNK_SIZE, LOD_SPACING, SEA_LEVEL, VEGETATION_MAX_LOD, FAR_TILE_SIZE, 
 import { hash2, Rng } from './noise';
 import { createTerrainSample, WorldGen, type TerrainSample, type VegetationChoice } from './WorldGen';
 
+/**
+ * Per-vertex shader auxiliaries: snow altitude factor (before slope), rockiness
+ * bias (alpine/arid), wetness near the water line, aridness (for red strata).
+ */
+function auxAt(s: TerrainSample, out: Float32Array, o: number): void {
+  const line = s.snowLine + 40 * s.detail;
+  const t = (s.height - (line - 90)) / 180;
+  const snowAlt = t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
+  const w = s.weights;
+  out[o] = snowAlt;
+  out[o + 1] = Math.min(1, w[1] * 0.9 + w[3] * 0.5);
+  const hw = s.height;
+  out[o + 2] = hw < 0.2 ? 0.45 : hw > 1.6 ? 0 : 0.45 * (1 - (hw - 0.2) / 1.4);
+  out[o + 3] = w[3];
+}
+
 /** Convert an sRGB-ish palette color in place to linear for vertex colors. */
 function toLinear(c: Float32Array, o: number): void {
   c[o] = Math.pow(c[o], 2.2);
@@ -34,6 +50,8 @@ export interface ChunkMeshData {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
+  /** Per-vertex shader data: [snow altitude factor, rockiness, wetness, aridness]. */
+  aux: Float32Array;
   indices: Uint32Array;
   /** (segments+1)^2 heights for collision, row-major with x fastest. */
   heights: Float32Array;
@@ -44,6 +62,8 @@ export interface ChunkMeshData {
   hasWater: boolean;
   /** Tree instances: [gx, gy, gz, species, scale, rotation] * n. */
   trees: Float32Array;
+  /** Ground cover instances (LOD0 only): [gx, gy, gz, scale, rotation, kind] * n. */
+  cover: Float32Array;
 }
 
 export const TREE_STRIDE = 6;
@@ -58,7 +78,7 @@ export function worldToChunk(x: number, z: number): { cx: number; cz: number } {
 }
 
 /** Build the terrain mesh for chunk (cx,cz) at a LOD level. */
-export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: number, vegetationDensity = 1): ChunkMeshData {
+export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: number, coverDensity = 0): ChunkMeshData {
   const spacing = LOD_SPACING[lod];
   const segs = CHUNK_SIZE / spacing;
   const n = segs + 1;
@@ -86,6 +106,7 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
   const positions = new Float32Array(vertCount * 3);
   const normals = new Float32Array(vertCount * 3);
   const colors = new Float32Array(vertCount * 3);
+  const aux = new Float32Array(vertCount * 4);
   const heights = new Float32Array(n * n);
   let minH = Infinity, maxH = -Infinity;
 
@@ -112,8 +133,9 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
       normals[vi * 3 + 2] = nz;
       unpackSample(cache, gi * SAMPLE_STRIDE, sample);
       const slope = Math.hypot(dx, dz);
-      gen.colorAt(sample, slope, x, z, colors, vi * 3);
+      gen.colorAt(sample, slope, x, z, colors, vi * 3, false);
       toLinear(colors, vi * 3);
+      auxAt(sample, aux, vi * 4);
     }
   }
 
@@ -131,6 +153,10 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
     colors[sv * 3] = colors[src * 3];
     colors[sv * 3 + 1] = colors[src * 3 + 1];
     colors[sv * 3 + 2] = colors[src * 3 + 2];
+    aux[sv * 4] = aux[src * 4];
+    aux[sv * 4 + 1] = aux[src * 4 + 1];
+    aux[sv * 4 + 2] = aux[src * 4 + 2];
+    aux[sv * 4 + 3] = aux[src * 4 + 3];
     skirtIndex[k] = sv;
     sv++;
   };
@@ -172,23 +198,31 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
     indices[ii++] = t0; indices[ii++] = s1; indices[ii++] = s0;
   }
 
-  const trees = lod <= VEGETATION_MAX_LOD ? buildVegetation(gen, cx, cz, vegetationDensity) : new Float32Array(0);
+  // Trees are placed at a fixed density regardless of preset (identical
+  // colliders everywhere); ground cover is a preset-scaled near-field extra.
+  const trees = lod <= VEGETATION_MAX_LOD ? buildVegetation(gen, cx, cz) : new Float32Array(0);
+  const cover = lod === 0 && coverDensity > 0 ? buildGroundCover(gen, cx, cz, coverDensity) : new Float32Array(0);
 
   return {
     cx, cz, lod,
-    positions, normals, colors, indices,
+    positions, normals, colors, aux, indices,
     heights, segments: segs, spacing,
     minHeight: minH, maxHeight: maxH,
     hasWater: minH < SEA_LEVEL + 1.5,
     trees,
+    cover,
   };
 }
 
 const VEG_CELL = 12.8; // m
 const VEG_CELLS = Math.round(CHUNK_SIZE / VEG_CELL); // 40
 
-/** Deterministic vegetation placement for a chunk from its own random stream. */
-export function buildVegetation(gen: WorldGen, cx: number, cz: number, densityMul: number): Float32Array {
+/**
+ * Deterministic vegetation placement for a chunk from its own random stream.
+ * Density is fixed (not preset dependent) so obstacle placement is identical
+ * on every graphics preset.
+ */
+export function buildVegetation(gen: WorldGen, cx: number, cz: number): Float32Array {
   const ox = cx * CHUNK_SIZE, oz = cz * CHUNK_SIZE;
   const sample = createTerrainSample();
   const choice: VegetationChoice = { density: 0, species: 0 };
@@ -207,10 +241,47 @@ export function buildVegetation(gen: WorldGen, cx: number, cz: number, densityMu
       const hx = gen.heightAt(x + d, z) - gen.heightAt(x - d, z);
       const hz = gen.heightAt(x, z + d) - gen.heightAt(x, z - d);
       const slope = Math.hypot(hx, hz) / (2 * d);
-      gen.vegetationAt(sample, slope, u, choice);
-      const p = choice.density * densityMul * 0.55;
+      gen.vegetationAt(sample, slope, u, choice, x, z);
+      const p = choice.density * 0.5;
       if (roll >= p) continue;
       out.push(x, h, z, choice.species, 0.8 + sc * 0.55, rot * Math.PI * 2);
+    }
+  }
+  return Float32Array.from(out);
+}
+
+const COVER_CELL = 7.2; // m
+const COVER_CELLS = Math.floor(CHUNK_SIZE / COVER_CELL);
+export const COVER_STRIDE = 6;
+
+/**
+ * Near-field ground cover (grass tufts, dry tufts, reeds): purely visual,
+ * never an obstacle. `density` is the preset multiplier.
+ */
+export function buildGroundCover(gen: WorldGen, cx: number, cz: number, density: number): Float32Array {
+  const ox = cx * CHUNK_SIZE, oz = cz * CHUNK_SIZE;
+  const sample = createTerrainSample();
+  const out: number[] = [];
+  const rng = new Rng(hash2(cx, cz, gen.seed ^ 0x6ee2a5));
+  for (let j = 0; j < COVER_CELLS; j++) {
+    for (let i = 0; i < COVER_CELLS; i++) {
+      const jx = rng.next(), jz = rng.next(), roll = rng.next(), sc = rng.next(), rot = rng.next();
+      const x = ox + (i + jx) * COVER_CELL;
+      const z = oz + (j + jz) * COVER_CELL;
+      gen.sample(x, z, sample);
+      const h = sample.height;
+      if (h < 0.6) continue;
+      const w = sample.weights;
+      let p = w[0] * 0.9 + w[5] * 0.9 + w[4] * 0.85 + w[2] * 0.3 + w[3] * 0.18 + w[1] * 0.35;
+      if (h > sample.snowLine - 120) p *= 0.2;
+      p *= density * 0.55;
+      if (roll >= p) continue;
+      let kind = 0;
+      if (w[5] > 0.5) kind = 1;
+      else if (w[3] > 0.4 || w[2] > 0.5) kind = 2;
+      else if (w[4] > 0.5) kind = 3;
+      else kind = rng.next() < 0.5 ? 0 : 1;
+      out.push(x, h, z, 0.8 + sc * 0.9, rot * Math.PI * 2, kind);
     }
   }
   return Float32Array.from(out);
@@ -222,6 +293,7 @@ export interface FarTileData {
   positions: Float32Array;
   normals: Float32Array;
   colors: Float32Array;
+  aux: Float32Array;
   indices: Uint32Array;
 }
 
@@ -242,6 +314,7 @@ export function buildFarTile(gen: WorldGen, tx: number, tz: number): FarTileData
   const positions = new Float32Array(n * n * 3);
   const normals = new Float32Array(n * n * 3);
   const colors = new Float32Array(n * n * 3);
+  const aux = new Float32Array(n * n * 4);
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const gi = (j + 1) * gn + (i + 1);
@@ -263,13 +336,10 @@ export function buildFarTile(gen: WorldGen, tx: number, tz: number): FarTileData
         // deep water color for the far shell so it reads as sea
         colors[vi * 3] = 0.16; colors[vi * 3 + 1] = 0.34; colors[vi * 3 + 2] = 0.46;
       } else {
-        // Color from a fine-scale slope so rock/snow agree with the detailed tier.
-        const d = 6;
-        const sx = (gen.heightAt(x + d, z) - gen.heightAt(x - d, z)) / (2 * d);
-        const sz = (gen.heightAt(x, z + d) - gen.heightAt(x, z - d)) / (2 * d);
-        gen.colorAt(sample, Math.hypot(sx, sz), x, z, colors, vi * 3);
+        gen.colorAt(sample, Math.hypot(dx, dz), x, z, colors, vi * 3, false);
       }
       toLinear(colors, vi * 3);
+      auxAt(sample, aux, vi * 4);
     }
   }
   const indices = new Uint32Array(segs * segs * 6);
@@ -281,7 +351,7 @@ export function buildFarTile(gen: WorldGen, tx: number, tz: number): FarTileData
       indices[ii++] = a; indices[ii++] = d; indices[ii++] = b;
     }
   }
-  return { tx, tz, positions, normals, colors, indices };
+  return { tx, tz, positions, normals, colors, aux, indices };
 }
 
 /**

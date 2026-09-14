@@ -66,9 +66,25 @@ describe('Save validation', () => {
     expect(resolveSeed(null, null, 5)).toMatchObject({ seed: 5, save: null, reason: 'fresh' });
   });
 
-  it('obsolete world versions are not restored', () => {
+  it('older world versions are migrated: seed and x/z kept, geography-bound progress reset', () => {
     const old = { ...goodSave(), worldVersion: WORLD_GEN_VERSION - 1 };
-    expect(resolveSeed(null, old, 5)).toMatchObject({ seed: 5, save: null, reason: 'fresh' });
+    const r = resolveSeed(null, old, 5);
+    expect(r.reason).toBe('saved-world-migrated');
+    expect(r.migrated).toBe(true);
+    expect(r.seed).toBe(1207);
+    expect(r.save).not.toBeNull();
+    expect(r.save!.worldVersion).toBe(WORLD_GEN_VERSION);
+    expect(r.save!.position.x).toBe(10);
+    expect(r.save!.position.z).toBe(-20);
+    expect(r.save!.discovered).toEqual([]);
+    expect(r.save!.explored).toEqual([]);
+    expect(r.save!.waypoint).toBeNull();
+    expect(r.save!.timeOfDay).toBe(0.4);
+    // A URL seed that differs still wins over the old save.
+    expect(resolveSeed(42, old, 5)).toMatchObject({ seed: 42, save: null, migrated: false });
+    // A save from a newer build is not trusted.
+    const newer = { ...goodSave(), worldVersion: WORLD_GEN_VERSION + 1 };
+    expect(resolveSeed(null, newer, 5)).toMatchObject({ seed: 5, save: null, reason: 'fresh' });
   });
 });
 

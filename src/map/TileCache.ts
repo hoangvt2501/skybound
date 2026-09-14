@@ -145,8 +145,22 @@ export class TileCache {
             }
           }
           if (!drawn) {
-            ctx.fillStyle = '#20303a';
+            // Stable loading placeholder: neutral fill with a faint hatch.
+            ctx.fillStyle = '#243440';
             ctx.fillRect(px, py, pw + 0.5, pw + 0.5);
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(px, py, pw, pw);
+            ctx.clip();
+            ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+            ctx.lineWidth = 1;
+            for (let k = -pw; k < pw; k += 14) {
+              ctx.beginPath();
+              ctx.moveTo(px + k, py + pw);
+              ctx.lineTo(px + k + pw, py);
+              ctx.stroke();
+            }
+            ctx.restore();
           }
         }
       }

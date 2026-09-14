@@ -41,6 +41,7 @@ export class SettingsPanel {
           <label><input type="checkbox" data-key="invertVertical"> Invert vertical (W dives)</label>
           <label>Mouse sensitivity <input type="range" min="0.3" max="2.5" step="0.1" data-key="sensitivity"></label>
           <label><input type="checkbox" data-key="reducedMotion"> Reduced motion (no shake, steady FOV)</label>
+          <label><input type="checkbox" data-key="autoCenterCamera"> Auto-center camera after looking around</label>
           <label>Volume <input type="range" min="0" max="1" step="0.05" data-key="volume"></label>
           <label><input type="checkbox" data-key="muted"> Mute</label>
           <label>Time of day <input type="range" min="0" max="1" step="0.005" class="time-input"></label>

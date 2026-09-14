@@ -90,3 +90,61 @@ test('touch layout: joystick turns and climbs, flap button lifts, overlay gestur
   await simWait(page, 0.5);
   expect(errors).toEqual([]);
 });
+
+test('touch: pinch and cancelled gestures never place a waypoint; one-finger scene drag looks around', async ({ page }) => {
+  await page.goto('/?fresh=1');
+  await page.evaluate(() => localStorage.setItem('skybound.settings.v1', JSON.stringify({ quality: 'low', helpSeen: true })));
+  await page.reload();
+  await page.waitForFunction(() => window.skybound && window.skybound.debug().phase === 'start', null, { timeout: 90_000 });
+  await page.tap('[data-action="start"]');
+  await page.waitForFunction(() => window.skybound.debug().phase === 'flying');
+  await expect(page.locator('.start')).toBeHidden();
+  await page.evaluate(() => { window.skybound.debug().autopilot.enabled = false; });
+  const cdp = await page.context().newCDPSession(page);
+  const touch = async (type: 'touchStart' | 'touchMove' | 'touchEnd' | 'touchCancel', points: { x: number; y: number; id: number }[]) => {
+    await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map((p) => ({ x: p.x, y: p.y, id: p.id })) });
+  };
+  const state = () => page.evaluate(() => { const d = window.skybound.debug(); return { cam: d.cameraState(), waypoint: d.nav.waypoint, view: d.mapView(), turn: d.state.turnSmooth, heading: d.state.heading }; });
+
+  // One-finger drag on empty canvas (right half, above the buttons) orbits the camera without steering.
+  const vp = page.viewportSize()!;
+  const s0 = await state();
+  await touch('touchStart', [{ x: vp.width * 0.55, y: vp.height * 0.35, id: 7 }]);
+  for (let i = 1; i <= 6; i++) { await touch('touchMove', [{ x: vp.width * 0.55 + i * 25, y: vp.height * 0.35, id: 7 }]); await page.waitForTimeout(40); }
+  await touch('touchEnd', []);
+  // Deltas are consumed on the next rendered frame (slow under software GL).
+  await page.waitForFunction(() => window.skybound.debug().cameraState().freeLook === true, null, { timeout: 30_000 });
+  const s1 = await state();
+  expect(s1.cam.freeLook).toBe(true);
+  expect(Math.abs(s1.cam.azimuth - s0.cam.azimuth)).toBeGreaterThan(0.2);
+  expect(Math.abs(s1.turn)).toBeLessThan(0.05);
+
+  // Map: pinch (two fingers) zooms/pans and must not place a waypoint; a cancelled touch neither.
+  await page.tap('[data-action="map"]');
+  await expect(page.locator('.worldmap')).toBeVisible();
+  const box = (await page.locator('.worldmap-canvas').boundingBox())!;
+  const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+  const v0 = (await state()).view;
+  await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }]);
+  await touch('touchStart', [{ x: cx - 40, y: cy, id: 1 }, { x: cx + 40, y: cy, id: 2 }]);
+  for (let i = 1; i <= 5; i++) {
+    await touch('touchMove', [{ x: cx - 40 - i * 12, y: cy, id: 1 }, { x: cx + 40 + i * 12, y: cy, id: 2 }]);
+    await page.waitForTimeout(40);
+  }
+  await touch('touchEnd', [{ x: cx + 100, y: cy, id: 2 }]);
+  await touch('touchEnd', []);
+  await page.waitForTimeout(300);
+  const s2 = await state();
+  expect(s2.waypoint).toBeNull();
+  expect(s2.view.metersPerPixel).toBeLessThan(v0.metersPerPixel);
+  await touch('touchStart', [{ x: cx, y: cy, id: 3 }]);
+  await touch('touchCancel', []);
+  await page.waitForTimeout(300);
+  expect((await state()).waypoint).toBeNull();
+  // A clean tap still places one.
+  await page.tap('.worldmap-canvas', { position: { x: box.width * 0.4, y: box.height * 0.4 } });
+  await page.waitForTimeout(300);
+  expect((await state()).waypoint).not.toBeNull();
+  await page.tap('.worldmap [data-action="close"]');
+  await expect(page.locator('.worldmap')).toBeHidden();
+});

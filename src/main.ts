@@ -58,6 +58,7 @@ function boot(): void {
       settings,
       store,
       urlSeed: urlSeed !== null,
+      migrated: resolved.migrated,
     });
     (window as unknown as { skybound: unknown }).skybound = app;
     // eslint-disable-next-line no-console

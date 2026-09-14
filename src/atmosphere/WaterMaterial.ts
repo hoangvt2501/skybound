@@ -23,10 +23,12 @@ export class WaterMaterial extends THREE.ShaderMaterial {
       ]),
       vertexShader: /* glsl */ `
         attribute float depth;
+        attribute float exposure;
         uniform float uTime;
         uniform vec2 uOrigin;
         varying vec3 vWorld;
         varying float vDepth;
+        varying float vExposure;
         varying vec2 vGlobal;
         #include <fog_pars_vertex>
         void main() {
@@ -35,6 +37,7 @@ export class WaterMaterial extends THREE.ShaderMaterial {
           // Surface stays flat: vertical displacement lets shallow seabed poke through.
           vWorld = wp.xyz;
           vDepth = depth;
+          vExposure = exposure;
           vec4 mvPosition = viewMatrix * wp;
           gl_Position = projectionMatrix * mvPosition;
           #include <fog_vertex>
@@ -50,6 +53,7 @@ export class WaterMaterial extends THREE.ShaderMaterial {
         uniform float uAmbient;
         varying vec3 vWorld;
         varying float vDepth;
+        varying float vExposure;
         varying vec2 vGlobal;
         #include <fog_pars_fragment>
 
@@ -72,30 +76,41 @@ export class WaterMaterial extends THREE.ShaderMaterial {
         }
 
         void main() {
+          // Exposure: 1 = open sea (wind ripples, surf), 0 = sheltered lake (calm).
+          float exposure = clamp(vExposure, 0.0, 1.0);
           // Ripple strength fades with distance so far water does not alias.
           float dist = length(cameraPosition - vWorld);
-          float strength = 1.6 / (1.0 + dist / 260.0);
-          vec3 n = ripple(vGlobal, uTime, strength);
+          float strength = (0.5 + 1.1 * exposure) / (1.0 + dist / 260.0);
+          vec3 n = ripple(vGlobal, uTime * (0.55 + 0.45 * exposure), strength);
           vec3 viewDir = normalize(cameraPosition - vWorld);
           float depthM = max(0.0, -vDepth);
           float shallow = 1.0 - smoothstep(0.0, 14.0, depthM);
-          vec3 base = mix(uDeepColor, uShallowColor, shallow);
+          // Lakes read slightly darker and greener than the open sea.
+          vec3 deep = mix(uDeepColor * vec3(0.9, 1.0, 0.85), uDeepColor, exposure);
+          vec3 shallowCol = mix(uShallowColor * vec3(0.85, 0.95, 0.8), uShallowColor, exposure);
+          vec3 base = mix(deep, shallowCol, shallow);
           float fres = pow(1.0 - max(0.0, dot(viewDir, n)), 3.0);
           fres = 0.15 + 0.7 * fres;
           vec3 col = mix(base, uSkyColor, fres);
-          // Sun glint
+          // Sun glint (softer on calm water).
           vec3 h = normalize(uSunDir + viewDir);
-          float spec = pow(max(0.0, dot(n, h)), 180.0) * max(0.0, uSunDir.y + 0.05) * 1.6;
+          float spec = pow(max(0.0, dot(n, h)), 180.0) * max(0.0, uSunDir.y + 0.05) * (0.9 + 0.9 * exposure);
           spec += pow(max(0.0, dot(n, h)), 24.0) * 0.12 * max(0.0, uSunDir.y);
           col += uSunColor * spec;
-          // Shore foam: bright noisy band near depth 0.
-          float foamBand = 1.0 - smoothstep(0.0, 1.8, depthM);
+          // Surf: only on exposed shores, broken by noise. Lakes get a faint,
+          // narrow wet-edge darkening instead of foam.
+          float foamBand = 1.0 - smoothstep(0.0, 1.6, depthM);
           float foamN = vnoise(vGlobal * 0.3 + vec2(uTime * 0.25, -uTime * 0.15));
-          float foam = foamBand * smoothstep(0.35, 0.75, foamN + 0.35 * foamBand);
-          col = mix(col, vec3(0.92, 0.95, 0.96) * uAmbient, foam * 0.75);
+          float surf = foamBand * smoothstep(0.42, 0.8, foamN + 0.3 * foamBand) * smoothstep(0.35, 0.8, exposure);
+          col = mix(col, vec3(0.92, 0.95, 0.96) * uAmbient, surf * 0.7);
           col *= mix(0.55, 1.0, uAmbient);
-          float alpha = mix(0.86, 0.97, 1.0 - shallow);
-          alpha = mix(alpha, 0.55, foamBand * 0.4);
+          float alpha = mix(0.82, 0.97, 1.0 - shallow);
+          alpha = mix(alpha, 0.5, foamBand * 0.45);
+          // Soft shoreline: fade across the interpolated water line. Pixels
+          // over land are occluded by the terrain anyway, so the fade may start
+          // slightly on the land side without leaking; this keeps small ponds
+          // that do not cover a water-grid vertex visible.
+          alpha *= smoothstep(-1.2, 0.35, -vDepth);
           gl_FragColor = vec4(col, alpha);
           #include <fog_fragment>
         }

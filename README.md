@@ -39,8 +39,9 @@ Open `?seed=<number or text>` to fly a specific world. `?seed=…&fresh=1` disca
 | **Space** (hold) | Flap: extra lift and thrust |
 | **Shift** (hold) | Boost: limited resource shown under the speed readout, recovers after a short delay |
 | **X** | Air brake |
-| **Left mouse drag** | Orbit the camera (does not steer); eases back after release |
+| **Left mouse drag** | Look around the bird: a 360° spherical orbit around the bird that is kept after release (does not steer, does not cancel autopilot) |
 | **Mouse wheel** | Camera distance |
+| **V** (or the on-screen *Reset view* button) | Smoothly return behind the bird and resume chase behaviour |
 | **C** | Chase ↔ cinematic camera |
 | **F** | Autopilot on/off (any manual input takes control back) |
 | **M** | World map (pauses the flight) |
@@ -51,7 +52,11 @@ Open `?seed=<number or text>` to fly a specific world. `?seed=…&fresh=1` disca
 
 No input = the bird keeps gliding with gentle drag and slow altitude loss. Diving gains speed; climbing costs it.
 
-**Touch devices**: left virtual stick (turn/climb), right-side **Flap** and **Boost** buttons, top-left buttons for Map, Autopilot, Camera, Recover and Pause. Drag on empty canvas to orbit the camera, pinch to change distance.
+**Touch devices**: left virtual stick (turn/climb), right-side **Flap** and **Boost** buttons, top-left buttons for Map, Autopilot, Camera, Recover and Pause. Drag on empty canvas to look around the bird, pinch to change distance.
+
+**World map** (M or the minimap): left-drag pans (the view is kept when you close and reopen), a short click (under 6 px of movement) places the waypoint or selects a discovered landmark, wheel/trackpad zoom is anchored under the pointer, **+ / −** zoom, **Center on bird** keeps the zoom, **Fit region** frames the 32 km region, arrow keys pan while the map has focus. One finger pans on touch, two fingers pinch-zoom around their midpoint; a pinch never places a waypoint. Flight stays paused while the map is open, and closing returns to the state you came from (paused or flying).
+
+Settings has an **Auto-center camera** toggle (off by default) that eases the view back behind the bird after a short idle time.
 
 ## What is in the world
 
@@ -59,7 +64,8 @@ No input = the bird keeps gliding with gentle drag and slow altitude loss. Divin
 - Six biome families with smooth transitions driven by elevation, temperature, moisture and shoreline distance: temperate forest & meadow, alpine mountains with elevation-based snow, coast/ocean/islands, arid plateau & canyons, wetlands & lakes, flowering uplands.
 - 15 deterministic landmarks of 8 types (stone arch, lighthouse, cliffside ruins, giant tree, mountain shrine, canyon bridge, standing stones, watchtower), each with a stable id, name, position, colliders and a discovery radius. Discovery adds them to the journal and the map.
 - Water at global sea level (lakes are inland basins below sea level, coast and islands). Rivers are intentionally not shipped: coastlines and lakes first.
-- Day/night cycle with sun, moon and stars, two drifting cloud layers, distance fog matched to the sky, animated water with shore foam, Web Audio wind and wingbeats.
+- Day/night cycle with sun, moon and stars, cumulus clusters built from sorted billboard puffs (lit tops, shaded undersides) under a thin cirrus sheet, distance fog matched to the sky, animated water with surf only on exposed shores and calm lakes, Web Audio wind and wingbeats.
+- Terrain shading is procedural per pixel: rock on steep faces with strata and cracks, snow that collects on shelves, wet banks, distance-aware grain. Trees have trunks, branches and layered crowns near the camera, billboard impostors further out, and grass tufts in the near field; trees are placed at a fixed density on every preset so collision is identical.
 
 Every seed gives a different island with the same geographic structure (a mountain spine, an arid quarter, a wetland coast, an upland quarter), so all six biomes are always reachable. The showcase seed is `1207`.
 
@@ -135,6 +141,8 @@ A versioned save (`skybound.save.v1`) holds seed, world-generation version, glob
 
 A `?seed=` URL wins over an unrelated save. Sharing a seed shares the world, not your progress. **New world…** and **Reset progress…** are explicit actions with confirmation.
 
+When terrain generation changes, `WORLD_GEN_VERSION` is bumped and an older save is **migrated** instead of discarded: the seed, horizontal position, time of day and settings are kept, the bird is re-seated in validated clear air above the new terrain, and geography-bound progress (discoveries, explored cells, waypoint) is reset with an on-screen notice.
+
 ## Deployment (static hosting)
 
 `npm run build` produces a self-contained static site in `dist/` (relative asset paths, so it works from any folder or sub-path).
@@ -147,12 +155,15 @@ The app uses module workers (`type: 'module'`), which every current browser supp
 
 ## Verification
 
-See [docs/VERIFICATION.md](docs/VERIFICATION.md) for the actual test output, screenshots and measured performance from the last check, including what could not be verified.
+See [docs/VERIFICATION.md](docs/VERIFICATION.md) for the actual test output, screenshots and measured performance from the last check, including what could not be verified. The scenery and mouse-exploration overhaul, with before/after comparisons and like-for-like performance numbers, is documented in [docs/VISUAL_UPGRADE.md](docs/VISUAL_UPGRADE.md).
+
+Performance note: on an integrated Intel GPU at 1080p the medium preset runs at ~44 fps with dynamic resolution disabled (60 fps on low); dynamic resolution (on by default) scales the render resolution to hold the frame budget.
 
 ## Limitations
 
 - Water is a single global level: no rivers, no elevated lakes yet.
-- Vegetation pops in at the LOD1 boundary (~2 km) rather than fading.
+- Full tree geometry switches to billboard impostors at the LOD1 boundary (~1 km) and impostors end at ~3.5 km; both transitions are pops softened by distance and fog, not cross-fades.
+- Cloud puffs are camera-facing sprites: convincing from below, beside and above, but a cloud seen from very close is a soft fade rather than a true volume.
 - Distant terrain (far shell) is coarse and deliberately sunk 14 m; where the detailed tier is still loading, the far shell shows through briefly.
 - Shadows cover a ±220 m box around the bird only.
 - WebGPU is not used; the renderer is WebGL2 only.

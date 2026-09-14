@@ -65,11 +65,14 @@ export class StartScreen {
 
   hide(): void {
     this.root.classList.add('fade-out');
+    // Stop intercepting input immediately, before the fade finishes.
+    this.root.style.pointerEvents = 'none';
     setTimeout(() => (this.root.hidden = true), 500);
   }
 
   show(): void {
     this.root.hidden = false;
+    this.root.style.pointerEvents = '';
     this.root.classList.remove('fade-out');
   }
 }

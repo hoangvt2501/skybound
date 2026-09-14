@@ -95,19 +95,42 @@ export interface SeedResolution {
   seed: number;
   /** Save to restore, or null if starting fresh. */
   save: SaveData | null;
-  reason: 'url-seed-new' | 'url-seed-matches-save' | 'saved-world' | 'fresh';
+  reason: 'url-seed-new' | 'url-seed-matches-save' | 'saved-world' | 'saved-world-migrated' | 'fresh';
+  /** True when the save came from an older world-generation version and was migrated. */
+  migrated: boolean;
 }
 
 /**
- * Seed precedence: a ?seed= value wins over an unrelated save; the save is
- * only restored when its seed matches and its world version is current.
+ * Migrate a save from an older world-generation version: the seed, horizontal
+ * position, time of day and preferences-like flight state are kept; anything
+ * tied to the old geography (discoveries, explored cells, waypoint, altitude)
+ * is dropped. The app re-validates altitude above the new terrain.
+ */
+export function migrateSave(save: SaveData): SaveData {
+  return {
+    ...save,
+    worldVersion: WORLD_GEN_VERSION,
+    discovered: [],
+    explored: [],
+    waypoint: null,
+    autopilot: false,
+    position: { x: save.position.x, y: save.position.y, z: save.position.z },
+  };
+}
+
+/**
+ * Seed precedence: a ?seed= value wins over an unrelated save; a save with a
+ * matching seed is restored, migrating it if its world version is older.
  */
 export function resolveSeed(urlSeed: number | null, save: SaveData | null, defaultSeed: number): SeedResolution {
-  const usable = save && save.worldVersion === WORLD_GEN_VERSION ? save : null;
-  if (urlSeed !== null) {
-    if (usable && usable.seed === urlSeed) return { seed: urlSeed, save: usable, reason: 'url-seed-matches-save' };
-    return { seed: urlSeed, save: null, reason: 'url-seed-new' };
+  if (!save) {
+    return { seed: urlSeed ?? defaultSeed, save: null, reason: urlSeed !== null ? 'url-seed-new' : 'fresh', migrated: false };
   }
-  if (usable) return { seed: usable.seed, save: usable, reason: 'saved-world' };
-  return { seed: defaultSeed, save: null, reason: 'fresh' };
+  const current = save.worldVersion === WORLD_GEN_VERSION;
+  const older = save.worldVersion < WORLD_GEN_VERSION;
+  if (urlSeed !== null && save.seed !== urlSeed) return { seed: urlSeed, save: null, reason: 'url-seed-new', migrated: false };
+  if (current) return { seed: save.seed, save, reason: urlSeed !== null ? 'url-seed-matches-save' : 'saved-world', migrated: false };
+  if (older) return { seed: save.seed, save: migrateSave(save), reason: 'saved-world-migrated', migrated: true };
+  // A save from a newer version than this build: do not trust it.
+  return { seed: urlSeed ?? defaultSeed, save: null, reason: 'fresh', migrated: false };
 }

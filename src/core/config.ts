@@ -4,7 +4,8 @@
  * in one place.
  */
 
-export const WORLD_GEN_VERSION = 3;
+/** Bump whenever terrain generation changes; older saves are migrated (position kept, discoveries reset). */
+export const WORLD_GEN_VERSION = 4;
 export const SAVE_VERSION = 1;
 export const SHOWCASE_SEED = 1207;
 
@@ -17,8 +18,10 @@ export const CHUNK_SIZE = 512;
 export const LOD_SPACING = [4, 8, 16, 32] as const;
 /** Chebyshev chunk-ring at which each LOD begins. */
 export const LOD_RINGS = [0, 2, 4, 7] as const;
-/** Vegetation is generated for chunks up to this LOD (inclusive). */
-export const VEGETATION_MAX_LOD = 1;
+/** Vegetation is generated for chunks up to this LOD (inclusive); LOD 2 renders impostors. */
+export const VEGETATION_MAX_LOD = 2;
+/** Full tree geometry up to this LOD (rings 0-1, ~1 km); beyond it impostors are used. */
+export const VEGETATION_FULL_LOD = 0;
 
 /** Far tier: coarse shell tiles beyond the detailed chunk radius. */
 export const FAR_TILE_SIZE = 4096;
@@ -32,10 +35,15 @@ export interface QualitySettings {
   chunkRadius: number;
   /** Far shell radius in far tiles (0 disables). */
   farRadius: number;
-  /** Multiplier on vegetation density. */
-  vegetationDensity: number;
+  /**
+   * Near-field ground cover density multiplier (0 disables). Trees are
+   * placed at a fixed density on every preset so collision is identical.
+   */
+  groundCover: number;
   shadows: boolean;
   clouds: boolean;
+  /** Maximum cloud puff billboards. */
+  cloudPuffs: number;
   maxPixelRatio: number;
   /** Fog visibility distance in meters (fog reaches ~full opacity here). */
   fogFar: number;
@@ -47,9 +55,10 @@ export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
   low: {
     chunkRadius: 5,
     farRadius: 2,
-    vegetationDensity: 0.45,
+    groundCover: 0,
     shadows: false,
     clouds: true,
+    cloudPuffs: 360,
     maxPixelRatio: 1,
     fogFar: 4200,
     maxJobs: 2,
@@ -57,9 +66,10 @@ export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
   medium: {
     chunkRadius: 7,
     farRadius: 3,
-    vegetationDensity: 0.8,
+    groundCover: 0.6,
     shadows: true,
     clouds: true,
+    cloudPuffs: 480,
     maxPixelRatio: 1.5,
     fogFar: 6200,
     maxJobs: 3,
@@ -67,9 +77,10 @@ export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
   high: {
     chunkRadius: 10,
     farRadius: 4,
-    vegetationDensity: 1,
+    groundCover: 1,
     shadows: true,
     clouds: true,
+    cloudPuffs: 900,
     maxPixelRatio: 2,
     fogFar: 8600,
     maxJobs: 4,

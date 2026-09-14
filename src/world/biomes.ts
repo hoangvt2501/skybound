@@ -19,13 +19,13 @@ export interface BiomeInfo {
 }
 
 export const BIOMES: BiomeInfo[] = [
-  { id: Biome.Temperate, name: 'Temperate forest & meadow', mapColor: [96, 138, 66], description: 'Rolling oak and pine woodland with open meadows.' },
-  { id: Biome.Alpine, name: 'Alpine mountains', mapColor: [150, 146, 140], description: 'Ridged peaks with snow above the tree line.' },
-  { id: Biome.Coast, name: 'Coast & islands', mapColor: [214, 196, 150], description: 'Sandy shores, shallow shelves and scattered islands.' },
-  { id: Biome.Arid, name: 'Arid plateau & canyons', mapColor: [196, 130, 80], description: 'Terraced red rock cut by deep canyons.' },
-  { id: Biome.Wetland, name: 'Wetlands & lakes', mapColor: [108, 128, 78], description: 'Flat marshes dotted with lakes and reed beds.' },
-  { id: Biome.Upland, name: 'Flowering uplands', mapColor: [122, 150, 88], description: 'High rolling hills covered in wildflowers.' },
-  { id: Biome.Ocean, name: 'Ocean', mapColor: [52, 96, 140], description: 'Open water.' },
+  { id: Biome.Temperate, name: 'Temperate forest & meadow', mapColor: [148, 180, 117], description: 'Rolling oak and pine woodland with open meadows.' },
+  { id: Biome.Alpine, name: 'Alpine mountains', mapColor: [158, 150, 140], description: 'Broad massifs with snow above the tree line.' },
+  { id: Biome.Coast, name: 'Coast & islands', mapColor: [219, 204, 158], description: 'Sandy shores, shallow shelves and scattered islands.' },
+  { id: Biome.Arid, name: 'Arid plateau & canyons', mapColor: [214, 168, 117], description: 'Terraced red rock cut by deep canyons.' },
+  { id: Biome.Wetland, name: 'Wetlands & lakes', mapColor: [153, 179, 133], description: 'Flat marshes dotted with lakes and reed beds.' },
+  { id: Biome.Upland, name: 'Flowering uplands', mapColor: [189, 186, 148], description: 'High rolling hills covered in wildflowers.' },
+  { id: Biome.Ocean, name: 'Ocean', mapColor: [64, 110, 158], description: 'Open water.' },
 ];
 
 /** Vegetation species indexes used by the instancer. */

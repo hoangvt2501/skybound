@@ -31,6 +31,9 @@ export class TouchControls {
     this.canvas = canvas;
     this.root = document.createElement('div');
     this.root.className = 'touch';
+    // The container spans the screen but must let touches reach the canvas
+    // outside the stick and buttons (those children re-enable pointer events).
+    this.root.style.pointerEvents = 'none';
     this.root.hidden = true;
     this.root.innerHTML = `
       <div class="touch-actions">

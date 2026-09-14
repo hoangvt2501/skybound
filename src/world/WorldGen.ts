@@ -66,6 +66,49 @@ export interface MacroLayout {
 
 const RH = REGION_HALF_SIZE;
 
+/** Smooth maximum: like max(a,b) but with a rounded blend of width k (forms saddles). */
+function smax(a: number, b: number, k: number): number {
+  const d = a - b;
+  return (a + b + Math.sqrt(d * d + k * k)) * 0.5;
+}
+
+/** Cell size (m) of the dominant-summit lattice. */
+const SUMMIT_CELL = 2400;
+
+/**
+ * Dominant summits: one candidate per lattice cell, each a broad-based peak
+ * with a slightly asymmetric profile. Returns a 0..1 shape combined with a
+ * smooth max over the 3x3 neighbourhood so ridges connect through saddles.
+ */
+function summits(x: number, z: number, seed: number): number {
+  const cx = Math.floor(x / SUMMIT_CELL), cz = Math.floor(z / SUMMIT_CELL);
+  let acc = 0;
+  for (let j = -1; j <= 1; j++) {
+    for (let i = -1; i <= 1; i++) {
+      const ix = cx + i, iz = cz + j;
+      const h0 = hash2(ix, iz, seed ^ 0x51ab) / 4294967296;
+      const h1 = hash2(ix, iz, seed ^ 0x77e1) / 4294967296;
+      const h2 = hash2(ix, iz, seed ^ 0x2c9d) / 4294967296;
+      const h3 = hash2(ix, iz, seed ^ 0x0b3f) / 4294967296;
+      const px = (ix + 0.2 + 0.6 * h0) * SUMMIT_CELL;
+      const pz = (iz + 0.2 + 0.6 * h1) * SUMMIT_CELL;
+      const radius = 800 + 700 * h2;
+      const weight = 0.55 + 0.45 * h3;
+      const dx = x - px, dz = z - pz;
+      // Slight elongation along a per-summit axis.
+      const ang = h0 * Math.PI;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      const ex = (dx * ca + dz * sa) / (radius * 1.25);
+      const ez = (-dx * sa + dz * ca) / radius;
+      const q = ex * ex + ez * ez;
+      if (q >= 1) continue;
+      const shape = Math.pow(1 - q, 1.35) * weight;
+      acc = smax(acc, shape, 0.12);
+    }
+  }
+  return acc;
+}
+
 function terrace(h: number, step: number): number {
   const q = h / step;
   const f = Math.floor(q);
@@ -210,12 +253,24 @@ export class WorldGen {
     let ridge = 0;
     let band = 0;
     if (mount > 0.001) {
-      ridge = this.nRidge.ridged(wx / 1900, wz / 1900, 5, 2, 0.46);
-      // Round the crests so peaks read as massifs rather than needles.
-      const rounded = ridge * ridge * (3 - 2 * ridge);
-      // Fine rock detail so faces read as stone rather than clay.
-      const rockDetail = this.nRidge.fbm(x / 230 + 7, z / 230 - 3, 2) * 34 + detail * 10;
-      const hMount = 300 + 1100 * Math.pow(rounded, 1.35) + 70 * hills + rockDetail * (0.4 + 0.6 * rounded);
+      // Geological structure at three scales:
+      //  1. a broad base mass that rises toward the spine core,
+      //  2. a few dominant summits on a lattice with wide bases,
+      //  3. medium-scale ridges connecting them through saddles,
+      // then broad valleys and, last, fine rock detail.
+      const core = mount;
+      const baseMass = 170 + 430 * Math.pow(core, 1.3) + 90 * this.nBase.fbm(wx / 3200 + 11, wz / 3200 - 7, 2);
+      const peakShape = summits(wx, wz, this.seed);
+      ridge = this.nRidge.ridged(wx / 1500, wz / 1500, 3, 2, 0.42);
+      const ridgeSoft = ridge * ridge * (3 - 2 * ridge);
+      const peaks = peakShape * (0.75 + 0.25 * ridgeSoft) * 760;
+      const ridges = Math.pow(ridgeSoft, 1.7) * 330;
+      const relief = smax(peaks, ridges, 70);
+      const valleys = smoothstep(0.55, 0.9, this.nBase.fbm(x / 1700 + 90, z / 1700 + 40, 2)) * 150;
+      // Medium-scale buttresses and gullies, then fine rock detail.
+      const buttress = this.nRidge.ridged(x / 620 + 21, z / 620 - 9, 2, 2, 0.5);
+      const rockDetail = this.nRidge.fbm(x / 260 + 7, z / 260 - 3, 2) * 24 + detail * 8;
+      const hMount = baseMass + relief * (0.4 + 0.6 * core) - valleys * core + (buttress - 0.5) * 90 * core + rockDetail * (0.5 + 0.5 * core) + 30 * hills;
       h += mount * hMount;
     }
     if (upland > 0.001) {
@@ -240,6 +295,14 @@ export class WorldGen {
       h += wet * hWet;
     }
 
+    // Foothills: rolling hills that grow toward the range so the massif
+    // rises out of broken ground rather than a flat field.
+    if (mount > 0.01 && mount < 0.999) {
+      const foot = smoothstep(0.02, 0.45, mount) * (1 - smoothstep(0.45, 1, mount));
+      const hillN = this.nHills.fbm(x / 900 + 3, z / 900 + 3, 3) * 0.5 + 0.5;
+      h += foot * (40 + 110 * hillN);
+    }
+
     // Coast: fall away to the seafloor where land-ness drops.
     const seafloor = -36 + 12 * hills + 9 * base + island * (68 + 30 * hills);
     const landT = Math.pow(land, 0.75);
@@ -258,7 +321,7 @@ export class WorldGen {
       0,
       1,
     );
-    const snowLine = 760 + 640 * (tempBase - 0.5);
+    const snowLine = 930 + 640 * (tempBase - 0.5);
 
     out.height = h;
     out.mount = mount;
@@ -342,7 +405,7 @@ export class WorldGen {
    * Ground color for a sample (sRGB-ish values 0..1). Writes r,g,b into
    * `out` at `offset`.
    */
-  colorAt(s: TerrainSample, slope: number, x: number, z: number, out: Float32Array | number[], offset = 0): void {
+  colorAt(s: TerrainSample, slope: number, x: number, z: number, out: Float32Array | number[], offset = 0, relief = true): void {
     const w = s.weights;
     const h = s.height;
     const n1 = s.hills * 0.5 + 0.5;
@@ -360,8 +423,9 @@ export class WorldGen {
     }
 
     if (w[Biome.Temperate] > 0) {
+      // Restrained greens: woodland floor to dry meadow.
       const m = smoothstep(0.35, 0.75, n1);
-      const tr = lerp(0.30, 0.52, m), tg = lerp(0.47, 0.58, m), tb = lerp(0.19, 0.24, m);
+      const tr = lerp(0.32, 0.55, m), tg = lerp(0.45, 0.55, m), tb = lerp(0.21, 0.29, m);
       r += w[Biome.Temperate] * tr; g += w[Biome.Temperate] * tg; b += w[Biome.Temperate] * tb;
     }
     if (w[Biome.Alpine] > 0) {
@@ -411,14 +475,15 @@ export class WorldGen {
       r += w[Biome.Upland] * ur; g += w[Biome.Upland] * ug; b += w[Biome.Upland] * ub;
     }
 
-    // Steep faces are rock.
-    const rock = smoothstep(0.55, 1.1, slope) * (1 - w[Biome.Coast] * 0.5) * (1 - w[Biome.Arid] * 0.9);
-    const rr = lerp(0.47, 0.60, n2), rg = lerp(0.43, 0.55, n2), rb = lerp(0.39, 0.50, n2);
-    r = lerp(r, rr, rock); g = lerp(g, rg, rock); b = lerp(b, rb, rock);
-
-    // Snow.
-    const snow = this.snowAt(s, slope);
-    r = lerp(r, 0.93, snow); g = lerp(g, 0.95, snow); b = lerp(b, 0.99, snow);
+    if (relief) {
+      // Steep faces are rock (the 3D terrain shader does this per pixel instead).
+      const rock = smoothstep(0.55, 1.1, slope) * (1 - w[Biome.Coast] * 0.5) * (1 - w[Biome.Arid] * 0.9);
+      const rr = lerp(0.47, 0.60, n2), rg = lerp(0.43, 0.55, n2), rb = lerp(0.39, 0.50, n2);
+      r = lerp(r, rr, rock); g = lerp(g, rg, rock); b = lerp(b, rb, rock);
+      // Snow.
+      const snow = this.snowAt(s, slope);
+      r = lerp(r, 0.93, snow); g = lerp(g, 0.95, snow); b = lerp(b, 0.99, snow);
+    }
 
     // Subtle variation.
     const vv = 1 + 0.06 * (n2 - 0.5);
@@ -431,7 +496,7 @@ export class WorldGen {
    * Vegetation density (expected instances per candidate cell, 0..1) and
    * species choice for a sample. `u` is a uniform random in [0,1).
    */
-  vegetationAt(s: TerrainSample, slope: number, u: number, out: VegetationChoice): VegetationChoice {
+  vegetationAt(s: TerrainSample, slope: number, u: number, out: VegetationChoice, x = 0, z = 0): VegetationChoice {
     const w = s.weights;
     const h = s.height;
     out.density = 0;
@@ -440,15 +505,17 @@ export class WorldGen {
     const snow = this.snowAt(s, slope);
     if (snow > 0.35) return out;
     const treeLine = 1 - smoothstep(s.snowLine - 260, s.snowLine - 60, h);
-    const patch = 0.35 + 0.65 * smoothstep(-0.3, 0.5, s.hills);
+    // Dense woods with gradual edges, occasional clearings and lone trees.
+    const patch = 0.12 + 0.88 * smoothstep(-0.35, 0.45, s.hills);
+    const clearing = 1 - 0.85 * smoothstep(0.22, 0.42, this.nVeg.noise(x / 230 + 3.7, z / 230 + 1.3));
     let density = 0;
-    density += w[Biome.Temperate] * 0.85 * patch;
-    density += w[Biome.Alpine] * 0.7 * patch;
+    density += w[Biome.Temperate] * 1.0 * patch;
+    density += w[Biome.Alpine] * 0.8 * patch;
     density += w[Biome.Coast] * 0.22;
     density += w[Biome.Arid] * 0.16;
-    density += w[Biome.Wetland] * 0.3 * smoothstep(1.5, 4, h);
-    density += w[Biome.Upland] * 0.28 * patch;
-    density *= treeLine;
+    density += w[Biome.Wetland] * 0.34 * smoothstep(1.5, 4, h);
+    density += w[Biome.Upland] * 0.3 * patch;
+    density *= treeLine * clearing;
     let species = Species.Oak;
     switch (s.biome) {
       case Biome.Temperate:

@@ -44,6 +44,8 @@ export interface AppOptions {
   store: KeyValueStore;
   /** Seed came from the URL. */
   urlSeed: boolean;
+  /** The save was migrated from an older world-generation version. */
+  migrated?: boolean;
 }
 
 type Phase = 'loading' | 'start' | 'flying' | 'paused';
@@ -106,12 +108,18 @@ export class App {
   private pixelRatio = 1;
   private lastDprAdjust = 0;
   private arrivedWaypointKey: string | null = null;
-  private mapOpenedOnce = false;
   private isTouch: boolean;
   private stepCounter = 0;
   private disposed = false;
   private seedIsUrl: boolean;
   readonly seed: number;
+  /** Debug/benchmark: when true the simulation does not step (rendering continues). */
+  private frozen = false;
+  /** Debug/benchmark: recent frame times in ms (bounded). */
+  private frameLog: number[] = [];
+  private canvasGrabbing = false;
+  private migrated = false;
+  private vegShaderHook: THREE.Material['onBeforeCompile'] | null = null;
 
   constructor(canvas: HTMLCanvasElement, ui: HTMLElement, opts: AppOptions) {
     this.seed = opts.seed;
@@ -164,13 +172,18 @@ export class App {
     this.bird = new BirdModel();
     this.bird.group.scale.setScalar(1.6);
     this.scene.add(this.bird.group);
-    this.cameraRig = new CameraRig(this.camera, (x, z) => this.chunks.surfaceAt(x, z));
+    this.cameraRig = new CameraRig(this.camera, {
+      surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
+      forEachObstacleNear: (x, z, r, cb) => terrain.forEachObstacleNear(x, z, r, cb),
+    });
     this.cameraRig.reducedMotion = this.settings.reducedMotion;
+    this.cameraRig.autoCenter = this.settings.autoCenterCamera;
 
     // Atmosphere.
     this.sky = new Sky(opts.seed);
     this.scene.add(this.sky.group);
-    this.clouds = new Clouds(opts.seed);
+    this.clouds = new Clouds(opts.seed, QUALITY_PRESETS.high.cloudPuffs);
+    this.clouds.setBudget(this.quality.cloudPuffs);
     this.clouds.visible = this.quality.clouds;
     this.scene.add(this.clouds.group);
     this.sun = new THREE.DirectionalLight(0xffffff, 2);
@@ -199,6 +212,7 @@ export class App {
     // Map & UI.
     this.tiles = new TileCache(this.chunks.workerPool);
     this.hud = new HUD(ui);
+    this.hud.onResetView = () => this.cameraRig.resetView();
     this.minimap = new Minimap(ui, this.tiles, {
       getPlayer: () => ({ x: this.renderState.x, z: this.renderState.z, heading: this.renderState.heading }),
       getLandmarks: () => this.landmarks.landmarks,
@@ -252,12 +266,14 @@ export class App {
     this.minimap.setVisible(false);
 
     // Initial flight state.
-    if (opts.save) this.restore(opts.save);
+    this.migrated = !!opts.migrated;
+    if (opts.save) this.restore(opts.save, this.migrated);
     else this.placeAtShowcaseStart();
     copyFlightState(this.flight.state, this.prevState);
     copyFlightState(this.flight.state, this.renderState);
     this.origin.setOrigin(Math.round(this.flight.state.x / 1000) * 1000, Math.round(this.flight.state.z / 1000) * 1000);
     this.cameraRig.setOrigin(this.origin.value.x, this.origin.value.z);
+    this.chunks.setOrigin(this.origin.value.x, this.origin.value.z);
     this.chunks.onFirstChunksReady = () => this.onWorldReady();
     this.chunks.update(this.flight.state.x, this.flight.state.z, Math.sin(this.flight.state.heading), -Math.cos(this.flight.state.heading), 0, true);
     this.landmarks.update(this.flight.state.x, this.flight.state.z, 1, this.quality.shadows);
@@ -299,7 +315,7 @@ export class App {
     this.day.setTime(0.31);
   }
 
-  private restore(save: SaveData): void {
+  private restore(save: SaveData, migrated = false): void {
     const s = this.flight.state;
     s.x = save.position.x; s.y = save.position.y; s.z = save.position.z;
     s.heading = save.heading;
@@ -307,6 +323,13 @@ export class App {
     s.speed = save.speed;
     s.boost = save.boost;
     s.odometer = save.odometer;
+    if (migrated) {
+      // Geography changed under the saved position: keep x/z but re-seat the
+      // bird in validated clear air above the new terrain.
+      const safe = findSafeAirborne({ heightAt: (a, b) => this.gen.heightAt(a, b), forEachObstacleNear: () => {} }, s.x, s.z, s.heading, 90);
+      s.x = safe.x; s.y = Math.max(safe.y, s.y); s.z = safe.z;
+      s.pitch = 0;
+    }
     // Validate: keep the bird above safe terrain with clearance.
     const ground = Math.max(this.gen.heightAt(s.x, s.z), SEA_LEVEL);
     if (s.y < ground + 25) s.y = ground + 60;
@@ -352,13 +375,21 @@ export class App {
     this.phase = 'flying';
     this.clock.reset();
     this.lastFrame = performance.now();
+    this.cameraRig.exitFreeLook();
     this.cameraRig.snap();
     if (!this.settings.helpSeen) {
       this.help.show(11000);
       this.settings.helpSeen = true;
       saveSettings(this.store, this.settings);
+      setTimeout(() => {
+        if (this.phase === 'flying') this.hud.toast(this.isTouch ? 'Drag empty space to look around · Pinch to zoom' : 'Drag to look around · Scroll to zoom · V to reset view', 'info', 6000);
+      }, 2500);
     }
     if (this.autopilot.enabled) this.hud.toast('Autopilot engaged (F to take control)');
+    if (this.migrated) {
+      this.hud.toast('World geography was updated: your position was kept, discoveries and waypoint were reset.', 'warn', 7000);
+      this.migrated = false;
+    }
     this.saveDirty = true;
   }
 
@@ -374,6 +405,7 @@ export class App {
     if (dt > 0.5) dt = 0.5;
     this.wallTime += dt;
     this.frameEma += (dt * 1000 - this.frameEma) * 0.08;
+    if (this.frameLog.length < 4000) this.frameLog.push(dt * 1000);
     this.fpsCounter.frames++;
     this.fpsCounter.time += dt;
     if (this.fpsCounter.time >= 0.5) {
@@ -385,7 +417,7 @@ export class App {
     this.handleActions();
 
     if (this.phase === 'flying' && !this.worldMap.isOpen) {
-      const steps = this.clock.advance(dt);
+      const steps = this.frozen ? 0 : this.clock.advance(dt);
       if (steps > 0) copyFlightState(this.flight.state, this.prevState);
       const cam = this.input.takeCamera();
       for (let i = 0; i < steps; i++) this.simStep();
@@ -450,6 +482,7 @@ export class App {
     }
     if (this.origin.maybeRebase(s.x, s.z)) {
       this.cameraRig.setOrigin(this.origin.value.x, this.origin.value.z);
+      this.chunks.setOrigin(this.origin.value.x, this.origin.value.z);
     }
   }
 
@@ -471,6 +504,7 @@ export class App {
     const fwdX = Math.sin(s.heading), fwdZ = -Math.cos(s.heading);
     this.chunks.update(s.x, s.z, fwdX, fwdZ, this.wallTime);
     this.landmarks.update(s.x, s.z, this.wallTime, this.quality.shadows);
+    this.veg.update(this.simTime, 0.83, 0.56);
 
     // Bird transform (render space).
     const bx = r.x - this.origin.value.x, bz = r.z - this.origin.value.z;
@@ -544,6 +578,12 @@ export class App {
       });
       this.minimap.update(this.wallTime);
       this.settingsPanel.syncTime();
+      this.hud.setFreeLook(this.cameraRig.freeLook);
+      const grabbing = this.input.isDragging;
+      if (grabbing !== this.canvasGrabbing) {
+        this.canvasGrabbing = grabbing;
+        this.renderer.domElement.classList.toggle('grabbing', grabbing);
+      }
     }
     if (this.dev.visible) {
       const st = this.chunks.stats();
@@ -680,6 +720,9 @@ export class App {
         case 'cycleCamera':
           if (this.phase === 'flying') this.cycleCamera();
           break;
+        case 'resetView':
+          if (this.phase === 'flying') this.cameraRig.resetView();
+          break;
         case 'togglePause':
           this.togglePause();
           break;
@@ -737,8 +780,7 @@ export class App {
     this.hud.setVisible(false);
     this.minimap.setVisible(false);
     this.touch?.setVisible(false);
-    this.worldMap.show(!this.mapOpenedOnce);
-    this.mapOpenedOnce = true;
+    this.worldMap.show();
     this.save(true);
   }
 
@@ -785,6 +827,7 @@ export class App {
     this.input.sensitivity = s.sensitivity;
     this.input.invertVertical = s.invertVertical;
     this.cameraRig.reducedMotion = s.reducedMotion;
+    this.cameraRig.autoCenter = s.autoCenterCamera;
     this.audio.setVolume(s.volume);
     this.audio.setMuted(s.muted);
     this.dev.setVisible(s.showDevOverlay);
@@ -810,6 +853,7 @@ export class App {
     this.chunks.setQuality(q);
     this.landmarks.setShadows(q.shadows);
     this.clouds.visible = q.clouds;
+    this.clouds.setBudget(q.cloudPuffs);
     this.fog.near = q.fogFar * 0.22;
     this.fog.far = q.fogFar;
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, q.maxPixelRatio);
@@ -900,6 +944,36 @@ export class App {
       seedIsUrl: this.seedIsUrl,
       worldRoot: this.worldRoot,
       landmarkMeshes: () => this.landmarks.meshInfo(),
+      freeze: (on: boolean) => {
+        this.frozen = on;
+        if (!on) {
+          this.clock.reset();
+          this.lastFrame = performance.now();
+        }
+      },
+      isFrozen: () => this.frozen,
+      takeFrameLog: () => {
+        const log = this.frameLog;
+        this.frameLog = [];
+        return log;
+      },
+      cameraPosition: () => this.camera.position.clone(),
+      cameraState: () => this.cameraRig.state(),
+      orbit: (az: number, el: number, dist?: number) => this.cameraRig.setOrbit(az, el, dist),
+      setClouds: (v: boolean) => { this.clouds.visible = v; },
+      terrainDetail: (v: number) => { this.chunks.setDetail(v); },
+      vegPlain: (on: boolean) => {
+        // Diagnostic: render trees with the stock Lambert shader.
+        const m = this.veg.material;
+        this.vegShaderHook ??= m.onBeforeCompile;
+        m.onBeforeCompile = on ? () => {} : this.vegShaderHook;
+        m.customProgramCacheKey = () => (on ? 'plain' : 'skybound-veg-v1');
+        m.needsUpdate = true;
+      },
+      mapView: () => this.worldMap.getView(),
+      mapOpen: () => this.worldMap.isOpen,
+      inputSnapshot: () => ({ dragging: this.input.isDragging, pitch: this.frameInput.pitch, turn: this.frameInput.turn, flap: this.frameInput.flap, boost: this.frameInput.boost, blocked: this.input.blocked }),
+      quality: () => this.settings.quality,
     };
   }
 

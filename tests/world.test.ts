@@ -39,9 +39,9 @@ describe('WorldGen determinism', () => {
   it('chunk meshes are identical regardless of generation order (incl. negative coords)', () => {
     const gen = new WorldGen(SHOWCASE_SEED);
     const order1 = [[-1, -1], [0, 0], [3, -2]] as const;
-    const first = order1.map(([cx, cz]) => buildChunkMesh(gen, cx, cz, 1, 1));
+    const first = order1.map(([cx, cz]) => buildChunkMesh(gen, cx, cz, 1));
     const gen2 = new WorldGen(SHOWCASE_SEED);
-    const second = [...order1].reverse().map(([cx, cz]) => buildChunkMesh(gen2, cx, cz, 1, 1)).reverse();
+    const second = [...order1].reverse().map(([cx, cz]) => buildChunkMesh(gen2, cx, cz, 1)).reverse();
     for (let i = 0; i < first.length; i++) {
       expect(first[i].positions).toEqual(second[i].positions);
       expect(first[i].colors).toEqual(second[i].colors);
@@ -51,8 +51,8 @@ describe('WorldGen determinism', () => {
 
   it('vegetation for a chunk is deterministic and lands on terrain', () => {
     const gen = new WorldGen(SHOWCASE_SEED);
-    const t1 = buildVegetation(gen, -2, 3, 1);
-    const t2 = buildVegetation(gen, -2, 3, 1);
+    const t1 = buildVegetation(gen, -2, 3);
+    const t2 = buildVegetation(gen, -2, 3);
     expect(t1).toEqual(t2);
     for (let i = 0; i < t1.length; i += 6) {
       const h = gen.heightAt(t1[i], t1[i + 2]);

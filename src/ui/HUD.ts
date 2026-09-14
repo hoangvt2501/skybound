@@ -36,7 +36,16 @@ export class HUD {
   private apEl: HTMLElement;
   private timeEl: HTMLElement;
   private toasts: HTMLElement;
+  private resetBtn: HTMLButtonElement;
   private last: Partial<Record<string, string | number | boolean>> = {};
+  /** Called when the on-screen "Reset view" button is pressed. */
+  onResetView: (() => void) | null = null;
+
+  /** Show the reset-view button only while a free-look orbit is active. */
+  setFreeLook(active: boolean): void {
+    if (this.resetBtn.hidden === !active) return;
+    this.resetBtn.hidden = !active;
+  }
 
   constructor(container: HTMLElement) {
     this.root = document.createElement('div');
@@ -51,6 +60,7 @@ export class HUD {
         <span class="hud-wp-text"></span>
       </div>
       <div class="hud-autopilot" hidden></div>
+      <button class="hud-resetview" type="button" hidden title="Reset view behind the bird (V)" aria-label="Reset view">Reset view (V)</button>
       <div class="hud-bottom">
         <div class="hud-readout">
           <div class="hud-stat"><span class="hud-stat-value hud-speed">0</span><span class="hud-stat-unit">km/h</span></div>
@@ -61,6 +71,8 @@ export class HUD {
       </div>
       <div class="hud-time"></div>
       <div class="hud-toasts" aria-live="polite"></div>`;
+    // The HUD must never intercept pointer/wheel events meant for the canvas.
+    this.root.style.pointerEvents = 'none';
     container.appendChild(this.root);
     const q = <T extends HTMLElement>(s: string) => this.root.querySelector<T>(s)!;
     this.speedEl = q('.hud-speed');
@@ -77,6 +89,12 @@ export class HUD {
     this.apEl = q('.hud-autopilot');
     this.timeEl = q('.hud-time');
     this.toasts = q('.hud-toasts');
+    this.resetBtn = q<HTMLButtonElement>('.hud-resetview');
+    this.resetBtn.style.pointerEvents = 'auto';
+    this.resetBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.onResetView?.();
+    });
     // Build the heading tape once: ticks every 15 degrees over 720 deg.
     let html = '';
     for (let d = -360; d <= 720; d += 15) {

@@ -28,7 +28,9 @@ export class HelpPanel {
         <span>Space (hold)</span><span>flap: lift + speed</span>
         <span>Shift (hold)</span><span>boost (limited)</span>
         <span>X</span><span>air brake</span>
-        <span>Left drag · wheel</span><span>orbit · camera distance</span>
+        <span>Left drag</span><span>look around the bird (view is kept)</span>
+        <span>Wheel</span><span>camera distance</span>
+        <span>V</span><span>reset view behind the bird</span>
         <span>C</span><span>chase / cinematic camera</span>
         <span>F</span><span>autopilot on/off</span>
         <span>M</span><span>world map &amp; waypoint</span>

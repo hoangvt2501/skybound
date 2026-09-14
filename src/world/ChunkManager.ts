@@ -5,15 +5,17 @@
  */
 import * as THREE from 'three';
 import {
-  CHUNK_SIZE, FAR_TILE_SIZE, LOD_RINGS, LOD_SPACING, SEA_LEVEL, type QualitySettings,
+  CHUNK_SIZE, FAR_TILE_SIZE, LOD_RINGS, LOD_SPACING, SEA_LEVEL, VEGETATION_FULL_LOD, type QualitySettings,
 } from '../core/config';
 import type { WorkerResponse } from '../workers/terrain.worker';
 import { WorkerPool } from '../workers/WorkerPool';
-import { SPECIES_COLLIDER, SPECIES_COUNT } from './biomes';
-import { chunkKey, sampleHeightGrid, TREE_STRIDE } from './chunkMesh';
-import type { VegetationLibrary } from './Vegetation';
-import type { WorldGen } from './WorldGen';
+import { SPECIES_COLLIDER } from './biomes';
+import { chunkKey, COVER_STRIDE, sampleHeightGrid, TREE_STRIDE } from './chunkMesh';
+import { hash2 } from './noise';
+import { IMPOSTOR_SIZE, type VegetationLibrary } from './Vegetation';
+import { createTerrainSample, type WorldGen } from './WorldGen';
 import type { WaterMaterial } from '../atmosphere/WaterMaterial';
+import { TerrainMaterial } from './TerrainMaterial';
 
 interface ChunkRecord {
   cx: number;
@@ -66,6 +68,19 @@ const _p = new THREE.Vector3();
 const _s = new THREE.Vector3();
 const _axis = new THREE.Vector3(0, 1, 0);
 
+/**
+ * A geometry that shares the vertex attribute buffers of `base` (uploaded to
+ * the GPU once) but can carry its own per-instance attributes.
+ */
+function shareGeometry(base: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry();
+  for (const name of Object.keys(base.attributes)) g.setAttribute(name, base.attributes[name]);
+  if (base.index) g.setIndex(base.index);
+  g.boundingSphere = base.boundingSphere ? base.boundingSphere.clone() : null;
+  g.boundingBox = base.boundingBox ? base.boundingBox.clone() : null;
+  return g;
+}
+
 export class ChunkManager {
   readonly root: THREE.Group;
   private chunks = new Map<string, ChunkRecord>();
@@ -81,6 +96,7 @@ export class ChunkManager {
   private lastPlayerChunk = { cx: NaN, cz: NaN };
   private lastUpdateTime = -1;
   private waterGeometry: THREE.PlaneGeometry;
+  private sampleScratch = createTerrainSample();
   private shadows = false;
   /** Total triangles currently in loaded chunk + far meshes (approx). */
   private triangleCount = 0;
@@ -101,8 +117,9 @@ export class ChunkManager {
     this.veg = veg;
     this.waterMaterial = waterMaterial;
     this.quality = quality;
-    this.terrainMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-    this.farMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.terrainMaterial = new TerrainMaterial();
+    this.farMaterial = new TerrainMaterial();
+    (this.farMaterial as TerrainMaterial).terrainUniforms.uDetail.value = 0;
     this.pool = new WorkerPool(gen.seed, workerCount);
     this.pool.onMessage((m) => this.onResult(m));
     // A job evicted from the bounded queue must free its record so the next
@@ -116,13 +133,25 @@ export class ChunkManager {
         if (rec && rec.requestId === req.id) rec.requestId = 0;
       }
     });
-    this.waterGeometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 16, 16);
+    // 48 segments (~10.7 m) so shoreline depth interpolation follows small ponds.
+    this.waterGeometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 48, 48);
     this.waterGeometry.rotateX(-Math.PI / 2);
     this.waterGeometry.translate(CHUNK_SIZE / 2, 0, CHUNK_SIZE / 2);
   }
 
   get workerPool(): WorkerPool {
     return this.pool;
+  }
+
+  /** Near-field terrain detail strength (0 disables grain/cracks; diagnostics and presets). */
+  setDetail(v: number): void {
+    (this.terrainMaterial as TerrainMaterial).terrainUniforms.uDetail.value = v;
+  }
+
+  /** Global coordinates of the render origin (for world-anchored shader detail). */
+  setOrigin(x: number, z: number): void {
+    (this.terrainMaterial as TerrainMaterial).setOrigin(x, z);
+    (this.farMaterial as TerrainMaterial).setOrigin(x, z);
   }
 
   setShadows(on: boolean): void {
@@ -134,10 +163,10 @@ export class ChunkManager {
   }
 
   setQuality(q: QualitySettings): void {
-    const vegChanged = q.vegetationDensity !== this.quality.vegetationDensity;
+    const vegChanged = q.groundCover !== this.quality.groundCover;
     this.quality = q;
     if (vegChanged) {
-      // Force rebuild so vegetation density matches the preset.
+      // Force rebuild so ground cover matches the preset (trees are unchanged).
       for (const rec of this.chunks.values()) {
         rec.lod = -1;
         rec.requestId = 0;
@@ -229,7 +258,7 @@ export class ChunkManager {
   private requestChunk(rec: ChunkRecord, lod: number, priority: number): void {
     const id = this.pool.allocId();
     rec.requestId = id;
-    const ok = this.pool.enqueue({ type: 'chunk', id, cx: rec.cx, cz: rec.cz, lod, veg: this.quality.vegetationDensity }, priority);
+    const ok = this.pool.enqueue({ type: 'chunk', id, cx: rec.cx, cz: rec.cz, lod, cover: this.quality.groundCover }, priority);
     if (!ok) rec.requestId = 0; // dropped by bounded queue; retried next update
   }
 
@@ -331,6 +360,7 @@ export class ChunkManager {
       g.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
       g.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
       g.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
+      g.setAttribute('aux', new THREE.BufferAttribute(msg.aux, 4));
       g.setIndex(new THREE.BufferAttribute(msg.indices, 1));
       g.computeBoundingSphere();
       const mesh = new THREE.Mesh(g, this.farMaterial);
@@ -350,6 +380,7 @@ export class ChunkManager {
     g.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
     g.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
+    g.setAttribute('aux', new THREE.BufferAttribute(msg.aux, 4));
     g.setIndex(new THREE.BufferAttribute(msg.indices, 1));
     g.computeBoundingSphere();
     const mesh = new THREE.Mesh(g, this.terrainMaterial);
@@ -370,10 +401,16 @@ export class ChunkManager {
       const wg = this.waterGeometry.clone();
       const pos = wg.attributes.position;
       const depth = new Float32Array(pos.count);
+      const exposure = new Float32Array(pos.count);
+      const ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
       for (let i = 0; i < pos.count; i++) {
         depth[i] = sampleHeightGrid(msg.heights, msg.segments, msg.spacing, pos.getX(i), pos.getZ(i));
+        // Open sea (low land-ness) is exposed to wind and surf; inland lakes are calm.
+        const land = this.gen.sample(ox + pos.getX(i), oz + pos.getZ(i), this.sampleScratch).land;
+        exposure[i] = THREE.MathUtils.clamp((0.75 - land) * 2.5, 0, 1);
       }
       wg.setAttribute('depth', new THREE.BufferAttribute(depth, 1));
+      wg.setAttribute('exposure', new THREE.BufferAttribute(exposure, 1));
       const water = new THREE.Mesh(wg, this.waterMaterial);
       water.position.set(rec.cx * CHUNK_SIZE, SEA_LEVEL, rec.cz * CHUNK_SIZE);
       water.updateMatrix();
@@ -383,43 +420,103 @@ export class ChunkManager {
       rec.water = water;
     }
 
-    // Vegetation: one InstancedMesh per species present.
-    const counts = new Int32Array(SPECIES_COUNT);
-    const n = msg.trees.length / TREE_STRIDE;
-    for (let i = 0; i < n; i++) counts[msg.trees[i * TREE_STRIDE + 3]]++;
-    const cursors = new Int32Array(SPECIES_COUNT);
-    const meshes: (THREE.InstancedMesh | null)[] = [];
-    for (let s = 0; s < SPECIES_COUNT; s++) {
-      if (counts[s] === 0) {
-        meshes.push(null);
-        continue;
-      }
-      const im = new THREE.InstancedMesh(this.veg.geometry(s), this.veg.material, counts[s]);
-      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-      im.castShadow = this.shadows;
-      im.position.set(rec.cx * CHUNK_SIZE, 0, rec.cz * CHUNK_SIZE);
-      meshes.push(im);
-    }
     const ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
-    for (let i = 0; i < n; i++) {
-      const o = i * TREE_STRIDE;
-      const s = msg.trees[o + 3];
-      const im = meshes[s]!;
-      _p.set(msg.trees[o] - ox, msg.trees[o + 1] - 0.15, msg.trees[o + 2] - oz);
-      _q.setFromAxisAngle(_axis, msg.trees[o + 5]);
-      const sc = msg.trees[o + 4];
-      _s.set(sc, sc, sc);
-      _m.compose(_p, _q, _s);
-      im.setMatrixAt(cursors[s]++, _m);
-    }
-    for (const im of meshes) {
-      if (!im) continue;
+    const n = msg.trees.length / TREE_STRIDE;
+    const finish = (im: THREE.InstancedMesh) => {
       im.instanceMatrix.needsUpdate = true;
       im.computeBoundingSphere();
+      im.position.set(ox, 0, oz);
       im.updateMatrix();
       im.matrixAutoUpdate = false;
       this.root.add(im);
       rec.treeMeshes.push(im);
+    };
+    if (n > 0 && msg.lod <= VEGETATION_FULL_LOD) {
+      // Full trees: one InstancedMesh per (species, geometry variant) present.
+      // The variant is a stable hash of the tree position.
+      const variantOf = (o: number) => {
+        const s = msg.trees[o + 3];
+        return hash2(Math.round(msg.trees[o] * 4), Math.round(msg.trees[o + 2] * 4), 77) % this.veg.variants(s);
+      };
+      const key = (s: number, v: number) => s * 8 + v;
+      const counts = new Map<number, number>();
+      for (let i = 0; i < n; i++) {
+        const o = i * TREE_STRIDE;
+        const k = key(msg.trees[o + 3], variantOf(o));
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+      }
+      const meshes = new Map<number, { im: THREE.InstancedMesh; rand: Float32Array; cursor: number }>();
+      for (const [k, c] of counts) {
+        const s = Math.floor(k / 8), v = k % 8;
+        const im = new THREE.InstancedMesh(this.veg.geometry(s, v), this.veg.material, c);
+        im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+        im.castShadow = this.shadows;
+        const rand = new Float32Array(c);
+        meshes.set(k, { im, rand, cursor: 0 });
+      }
+      for (let i = 0; i < n; i++) {
+        const o = i * TREE_STRIDE;
+        const s = msg.trees[o + 3];
+        const entry = meshes.get(key(s, variantOf(o)))!;
+        _p.set(msg.trees[o] - ox, msg.trees[o + 1] - 0.15, msg.trees[o + 2] - oz);
+        _q.setFromAxisAngle(_axis, msg.trees[o + 5]);
+        const sc = msg.trees[o + 4];
+        _s.set(sc, sc, sc);
+        _m.compose(_p, _q, _s);
+        entry.im.setMatrixAt(entry.cursor, _m);
+        entry.rand[entry.cursor] = hash2(Math.round(msg.trees[o] * 3), Math.round(msg.trees[o + 2] * 3), 913) / 4294967296;
+        entry.cursor++;
+      }
+      for (const { im, rand } of meshes.values()) {
+        // Per-instance random for crown displacement/wind phase. The geometry
+        // is shared, so the attribute is attached to a shallow per-mesh copy.
+        const g = shareGeometry(im.geometry);
+        g.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+        im.geometry = g;
+        finish(im);
+      }
+    } else if (n > 0) {
+      // Impostors: crossed billboards, one tile per species.
+      const im = new THREE.InstancedMesh(shareGeometry(this.veg.impostorGeometry), this.veg.impostorMaterial, n);
+      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      const tile = new Float32Array(n), rand = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const o = i * TREE_STRIDE;
+        const s = msg.trees[o + 3];
+        const sc = msg.trees[o + 4];
+        const [w, h] = IMPOSTOR_SIZE[s];
+        _p.set(msg.trees[o] - ox, msg.trees[o + 1] - 0.2, msg.trees[o + 2] - oz);
+        _q.setFromAxisAngle(_axis, msg.trees[o + 5]);
+        _s.set(w * sc, h * sc, w * sc);
+        _m.compose(_p, _q, _s);
+        im.setMatrixAt(i, _m);
+        tile[i] = s;
+        rand[i] = hash2(Math.round(msg.trees[o]), Math.round(msg.trees[o + 2]), 5) / 4294967296;
+      }
+      im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
+      im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+      finish(im);
+    }
+    // Ground cover (LOD0 only): purely visual.
+    const cn = msg.cover.length / COVER_STRIDE;
+    if (cn > 0) {
+      const im = new THREE.InstancedMesh(shareGeometry(this.veg.coverGeometry), this.veg.coverMaterial, cn);
+      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      const tile = new Float32Array(cn), rand = new Float32Array(cn);
+      for (let i = 0; i < cn; i++) {
+        const o = i * COVER_STRIDE;
+        const sc = msg.cover[o + 3];
+        _p.set(msg.cover[o] - ox, msg.cover[o + 1] - 0.05, msg.cover[o + 2] - oz);
+        _q.setFromAxisAngle(_axis, msg.cover[o + 4]);
+        _s.set(1.4 * sc, 0.9 * sc, 1.4 * sc);
+        _m.compose(_p, _q, _s);
+        im.setMatrixAt(i, _m);
+        tile[i] = msg.cover[o + 5];
+        rand[i] = hash2(Math.round(msg.cover[o] * 2), Math.round(msg.cover[o + 2] * 2), 17) / 4294967296;
+      }
+      im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
+      im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+      finish(im);
     }
     this.treeCount += n;
   }
@@ -438,6 +535,9 @@ export class ChunkManager {
     }
     for (const im of rec.treeMeshes) {
       this.root.remove(im);
+      // The per-mesh geometry only holds instance attributes plus references
+      // to shared buffers; disposing it frees the instance buffers.
+      im.geometry.dispose();
       im.dispose();
     }
     this.treeCount -= rec.trees.length / TREE_STRIDE;
