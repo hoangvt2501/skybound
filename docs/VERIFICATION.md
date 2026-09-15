@@ -1,5 +1,17 @@
 # Verification record
 
+## Smoothness pass (2026-09-15)
+
+Fixes for the reported in-flight stutter and the self-opening Settings; details in [SMOOTH_UPDATE.md](SMOOTH_UPDATE.md). Same machine and method as below.
+
+- Typecheck clean; 55 unit tests pass; production build passes; Playwright suite 11 of 11 on the final build.
+- **Settings button guard** (real Chrome): on a Pixel 7 emulation a 140 px touch drag starting on the in-flight button opens nothing, a clean tap opens Settings; on desktop, after closing the dialog focus is on BODY and neither Enter nor Space re-opens it.
+- **GPU attribution** (1080p, medium, fixed route, adaptive resolution off): base 44.0 fps; render scale 0.75 → 55.9 fps; shadows off 45.1; clouds off 45.7; per-pixel terrain detail off 45.5; plain vegetation shader 45.6; high preset 44.6; low preset 58.8. The frame is fill-rate bound.
+- **Adaptive resolution** (fixed route, 30 s after settling): at a 1.5× device pixel ratio the old controller sat at the 1.25 cap with 45.9 fps, 28.2 % missed refreshes and 221 frames over 33 ms; the new controller settles at 0.85–0.9 scale, 58.4 fps, 0.9 % missed, 10 frames over 33 ms. At 1× (1920×1080) it settles at 0.7–0.75 with the same 58.4 fps and 0.9 % missed.
+- **Preset detail A/B** (adaptive off, 60 s, same batch): new presets 44.3 and 44.6 fps, 0 frames over 50 ms; deployed commit d208143 44.3 fps, 0 frames over 50 ms; draw calls 253–327 vs 234–309. The extra chunk radius, ground cover and cloud puffs cost nothing measurable.
+- **Shipped default** (adaptive on, 1080p medium, 60 s): 57.2–57.4 fps average, per-frame p95 17.3 ms. A 90 s instrumented run after the final tuning shows the scale settling to 0.7 on the start screen, no scale change during the flight, and only two long frames (70 and 59 ms) inside the first 0.2 s after pressing Start (audio start and HUD reveal); every remaining frame stayed under 40 ms. Raw logs: `docs/perf/smooth*`, `docs/perf/base4*`, `docs/perf/ema-a-*`.
+- Not verified: the user's own device (if it is not this machine), and how the softer image at 0.7 scale reads to a person; adaptive resolution can be turned off in Settings.
+
 Last full pass: 2026-09-14 (cheerful update: procedural music, bird picker with portraits and flight profiles, rebuilt bird models, wildflowers, boulders, balloons, sailboats, changing skies), Windows 11 (10.0.26200), Node 24.13.1, npm 11.8.0. It supersedes the chill-update record (e34279f). The rationale for this iteration is in [CHEERFUL_UPDATE.md](CHEERFUL_UPDATE.md); earlier iterations keep their own documents ([CHILL_UPDATE.md](CHILL_UPDATE.md), [VISUAL_UPGRADE.md](VISUAL_UPGRADE.md)).
 
 ## Automated checks

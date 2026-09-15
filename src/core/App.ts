@@ -56,6 +56,8 @@ type Phase = 'loading' | 'start' | 'flying' | 'paused';
 const _v = new THREE.Vector3();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 const _hazeTint = new THREE.Color();
+/** Lowest adaptive render scale; below this the blur costs more than a few missed refreshes. */
+const MIN_RENDER_SCALE = 0.7;
 
 export class App {
   readonly renderer: THREE.WebGLRenderer;
@@ -114,6 +116,13 @@ export class App {
   private fpsCounter = { frames: 0, time: 0, fps: 60 };
   private pixelRatio = 1;
   private lastDprAdjust = 0;
+  private lastDprDrop = -Infinity;
+  private shadersWarm = false;
+  private dprCeiling = Infinity;
+  private missedFrames = 0;
+  private windowFrames = 0;
+  /** Refresh interval estimate (s), learned from the shortest frames seen. */
+  private refreshInterval = 1 / 60;
   private arrivedWaypointKey: string | null = null;
   private isTouch: boolean;
   private stepCounter = 0;
@@ -375,6 +384,11 @@ export class App {
     this.beginFlight();
   }
 
+  /** Compile every material already in the scene so the first balloon, boat or flock does not stall a frame. */
+  private warmShaders(): void {
+    try { this.renderer.compile(this.scene, this.camera); } catch (err) { console.warn('[skybound] shader warm-up skipped', err); }
+  }
+
   private beginFlight(): void {
     this.audio.setMix(this.settings);
     this.audio.setVolume(this.settings.volume);
@@ -421,6 +435,12 @@ export class App {
     if (dt > 0.5) dt = 0.5;
     this.wallTime += dt;
     this.frameEma += (dt * 1000 - this.frameEma) * 0.08;
+    // Learn the display refresh from the shortest frames (snaps down, creeps up very slowly, capped
+    // at 20 ms so a slow stretch cannot pass for a slow display), then count frames that missed a
+    // refresh. Displays faster than 60 Hz are held to 60: the target is smoothness, not 144 fps.
+    if (dt > 1 / 250) this.refreshInterval = Math.min(Math.max(dt, 1 / 165), Math.min(1 / 50, this.refreshInterval * 1.001));
+    this.windowFrames++;
+    if (dt > Math.max(this.refreshInterval, 1 / 60) * 1.35) this.missedFrames++;
     if (this.frameLog.length < 4000) this.frameLog.push(dt * 1000);
     this.fpsCounter.frames++;
     this.fpsCounter.time += dt;
@@ -582,15 +602,39 @@ export class App {
   private render(): void {
     this.renderer.render(this.scene, this.camera);
     this.adjustResolution();
+    // Compile every program once the opening chunks are in, while the start screen is still up.
+    if (!this.shadersWarm && this.phase === 'start' && this.wallTime > 1.5 && this.chunks.isLoadedAt(this.flight.state.x, this.flight.state.z)) { this.shadersWarm = true; this.warmShaders(); }
   }
 
+  /**
+   * Adaptive resolution that holds the display rate. Frame times are quantised
+   * by vsync, so a 60 Hz display never reports frames much below 16.7 ms: the
+   * old controller (raise below 13 ms) could lower the resolution but never
+   * bring it back, and it tolerated 24 ms frames, which on a 60 Hz display
+   * means alternating one- and two-refresh frames: exactly the judder players
+   * see. This one counts missed refreshes over a window: too many and the
+   * render scale steps down; a clean window after a cooldown probes one small
+   * step up, so the game settles at the highest scale that keeps every frame
+   * inside one refresh.
+   */
   private adjustResolution(): void {
-    if (!this.settings.dynamicResolution || this.phase !== 'flying') return;
-    if (this.wallTime - this.lastDprAdjust < 1.5) return;
+    // Runs on the start screen too (the same world renders behind it), so the scale is settled before the flight begins.
+    if (!this.settings.dynamicResolution || (this.phase !== 'flying' && this.phase !== 'start')) { this.missedFrames = 0; this.windowFrames = 0; return; }
+    if (this.wallTime - this.lastDprAdjust < 1.5 || this.windowFrames < 30) return;
+    const missRatio = this.missedFrames / this.windowFrames;
+    this.missedFrames = 0; this.windowFrames = 0;
     const maxPr = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
     let next = this.pixelRatio;
-    if (this.frameEma > 24 && this.pixelRatio > 0.6) next = Math.max(0.6, this.pixelRatio - 0.1);
-    else if (this.frameEma < 13 && this.pixelRatio < maxPr) next = Math.min(maxPr, this.pixelRatio + 0.1);
+    // A scale that missed refreshes becomes the ceiling; probes stop one step below it and the
+    // ceiling relaxes upward only slowly, so the scale does not oscillate around the limit.
+    if (this.wallTime - this.lastDprDrop > 120 && this.dprCeiling < maxPr) { this.dprCeiling = Math.min(maxPr, this.dprCeiling + 0.05); this.lastDprDrop = this.wallTime - 100; }
+    const probeLimit = Math.min(maxPr, this.dprCeiling - 0.05);
+    // Each scale change reallocates the drawing buffer (a visible hitch), so a badly missing
+    // window steps down in one larger move instead of several small ones.
+    const step = missRatio > 0.45 ? 0.25 : missRatio > 0.25 ? 0.15 : 0.1;
+    // Below 0.7 the picture turns to mush; a few missed refreshes are the better trade there.
+    if (missRatio > 0.12 && this.pixelRatio > MIN_RENDER_SCALE) { this.dprCeiling = this.pixelRatio; next = Math.max(MIN_RENDER_SCALE, this.pixelRatio - step); this.lastDprDrop = this.wallTime; }
+    else if (missRatio < 0.03 && this.pixelRatio < probeLimit && this.wallTime - this.lastDprDrop > 15) next = Math.min(probeLimit, this.pixelRatio + 0.05);
     if (Math.abs(next - this.pixelRatio) > 0.01) {
       this.pixelRatio = next;
       this.renderer.setPixelRatio(next);
@@ -876,6 +920,8 @@ export class App {
     this.startScreen.root.inert = false;
     this.pauseMenu.root.inert = false;
     this.settingsPanel.hide();
+    // Back in flight nothing should keep keyboard focus: Enter/Space must fly the bird, not re-open the dialog.
+    if (this.phaseBeforeSettings === 'flying' && document.activeElement instanceof HTMLElement) document.activeElement.blur();
     saveSettings(this.store, this.settings);
     if (this.phaseBeforeSettings === 'flying') this.resume();
     else if (this.phaseBeforeSettings === 'paused') {
@@ -944,6 +990,7 @@ export class App {
     this.fog.near = q.fogFar * 0.22;
     this.fog.far = q.fogFar;
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, q.maxPixelRatio);
+    this.dprCeiling = Infinity; this.lastDprDrop = -Infinity;
     this.renderer.setPixelRatio(this.pixelRatio);
     this.onResize();
     this.chunks.update(this.flight.state.x, this.flight.state.z, Math.sin(this.flight.state.heading), -Math.cos(this.flight.state.heading), this.wallTime, true);

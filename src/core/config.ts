@@ -52,10 +52,13 @@ export interface QualitySettings {
 }
 
 export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
+  // The frame is fill-rate bound on integrated GPUs (see docs/VERIFICATION.md): geometric
+  // detail is cheap while the adaptive render scale keeps every frame inside one refresh.
+  // Pixel-ratio caps are therefore modest; the controller raises the scale when there is room.
   low: {
     chunkRadius: 5,
     farRadius: 2,
-    groundCover: 0,
+    groundCover: 0.25,
     shadows: false,
     clouds: true,
     cloudPuffs: 360,
@@ -64,13 +67,13 @@ export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
     maxJobs: 2,
   },
   medium: {
-    chunkRadius: 7,
+    chunkRadius: 8,
     farRadius: 3,
-    groundCover: 0.6,
+    groundCover: 0.85,
     shadows: true,
     clouds: true,
-    cloudPuffs: 480,
-    maxPixelRatio: 1.5,
+    cloudPuffs: 600,
+    maxPixelRatio: 1.25,
     fogFar: 6200,
     maxJobs: 3,
   },
@@ -81,7 +84,7 @@ export const QUALITY_PRESETS: Record<QualityPreset, QualitySettings> = {
     shadows: true,
     clouds: true,
     cloudPuffs: 900,
-    maxPixelRatio: 2,
+    maxPixelRatio: 1.5,
     fogFar: 8600,
     maxJobs: 4,
   },

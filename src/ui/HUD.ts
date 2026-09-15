@@ -76,7 +76,22 @@ export class HUD {
     // The HUD must never intercept pointer/wheel events meant for the canvas.
     this.root.style.pointerEvents = 'none';
     container.appendChild(this.root);
-    this.root.querySelector('.hud-settings')!.addEventListener('click', () => this.onSettings?.());
+    // In-flight buttons open on a deliberate tap or click only. A look-around drag that
+    // happens to start on the button (touch pointers are captured by the element they
+    // start on) must not open Settings, and the button must not keep keyboard focus,
+    // otherwise Enter during flight would open it again.
+    const tapOnly = (button: HTMLElement, action: () => void) => {
+      let downX = 0, downY = 0, moved = false;
+      button.addEventListener('pointerdown', (e) => { downX = e.clientX; downY = e.clientY; moved = false; });
+      button.addEventListener('pointermove', (e) => { if (Math.hypot(e.clientX - downX, e.clientY - downY) > 8) moved = true; });
+      button.addEventListener('click', (e) => {
+        button.blur();
+        if (moved && e.detail > 0) { moved = false; return; } // pointer click after a drag: ignore (keyboard clicks have detail 0)
+        moved = false;
+        action();
+      });
+    };
+    tapOnly(this.root.querySelector<HTMLElement>('.hud-settings')!, () => this.onSettings?.());
     const q = <T extends HTMLElement>(s: string) => this.root.querySelector<T>(s)!;
     this.speedEl = q('.hud-speed');
     this.altEl = q('.hud-alt');
