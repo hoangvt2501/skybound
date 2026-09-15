@@ -35,6 +35,7 @@ export class HelpPanel {
         <span>F</span><span>autopilot on/off</span>
         <span>M</span><span>world map &amp; waypoint</span>
         <span>R</span><span>recover to safe air</span>
+        <span>P</span><span>photo mode (Enter captures, Esc leaves)</span>
         <span>Esc</span><span>close overlay / pause</span>
         <span>F3</span><span>developer overlay</span>
       </div>`;

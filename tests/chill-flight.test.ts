@@ -125,6 +125,6 @@ describe('bounded ambient wildlife', () => {
     world.update(4, 4000, 160, -1700, 4000, -2000, 'subtle', 'medium');
     world.group.traverse(o => { if (o instanceof THREE.InstancedMesh) expect(Array.from(o.instanceMatrix.array).every(Number.isFinite)).toBe(true); });
     world.update(4, 4000, 160, -1700, 4000, -2000, 'off', 'medium');
-    expect(world.counts()).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0 }); world.dispose();
+    expect(world.counts()).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0, fish: 0 }); world.dispose();
   });
 });

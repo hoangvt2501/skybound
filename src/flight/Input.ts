@@ -14,7 +14,7 @@ export type Action =
   | 'escape'
   | 'cycleCamera'
   | 'resetView'
-  | 'togglePause'
+  | 'togglePause' | 'photo' | 'confirm'
   | 'toggleDev';
 
 export interface CameraInput {
@@ -78,7 +78,8 @@ export class InputManager {
       case 'KeyH': this.actions.push('toggleHelp'); break;
       case 'KeyC': this.actions.push('cycleCamera'); break;
       case 'KeyV': this.actions.push('resetView'); break;
-      case 'KeyP': this.actions.push('togglePause'); break;
+      case 'KeyP': this.actions.push('photo'); break;
+      case 'Enter': this.actions.push('confirm'); break;
       case 'F3': this.actions.push('toggleDev'); e.preventDefault(); break;
       case 'Escape': this.actions.push('escape'); break;
       default: break;

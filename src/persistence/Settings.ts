@@ -28,6 +28,8 @@ export interface Settings {
   autoCenterCamera: boolean;
   /** Slowly changing haze and cloud cover (default on). */
   skyMoods: boolean;
+  /** Every bird flies with the reference handling; only looks and wingbeat differ (default off). */
+  uniformHandling: boolean;
 }
 
 export function defaultSettings(): Settings {
@@ -52,6 +54,7 @@ export function defaultSettings(): Settings {
     helpSeen: false,
     autoCenterCamera: false,
     skyMoods: true,
+    uniformHandling: false,
   };
 }
 
@@ -81,6 +84,7 @@ export function validateSettings(raw: unknown): Settings {
     helpSeen: bool(o.helpSeen, d.helpSeen),
     autoCenterCamera: bool(o.autoCenterCamera, d.autoCenterCamera),
     skyMoods: bool(o.skyMoods, d.skyMoods),
+    uniformHandling: bool(o.uniformHandling, d.uniformHandling),
   };
 }
 

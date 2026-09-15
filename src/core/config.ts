@@ -5,7 +5,7 @@
  */
 
 /** Bump whenever terrain generation changes; older saves are migrated (position kept, discoveries reset). */
-export const WORLD_GEN_VERSION = 4;
+export const WORLD_GEN_VERSION = 5;
 export const SAVE_VERSION = 1;
 export const SHOWCASE_SEED = 1207;
 

@@ -64,12 +64,30 @@ describe('scenery', () => {
     const sample = createTerrainSample(), choice = { density: 0, species: Species.Oak };
     let rocks = 0, trees = 0;
     for (let k = 0; k < 400; k++) {
-      const x = -2686 + (k % 20) * 30 - 300, z = 3929 + Math.floor(k / 20) * 30 - 300;
+      const x = -4186 + (k % 20) * 30 - 300, z = 2679 + Math.floor(k / 20) * 30 - 300; // alpine slope west of the mist valley
       const s = gen.sample(x, z, sample);
       gen.vegetationAt(s, gen.slopeAt(x, z), (k * 0.618) % 1, choice, x, z);
       if (choice.density > 0.2) { if (choice.species === Species.Rock) rocks++; else trees++; }
     }
     expect(rocks).toBeGreaterThan(5); expect(trees).toBeGreaterThan(rocks);
+  });
+  it('carves the mist valley: a low meadow floor with a lake between high walls, opening toward the wetland', () => {
+    const path = gen.valleyPath(10);
+    const mouth = path[0], head = path[10], mid = path[5];
+    expect(Math.hypot(head.x - mouth.x, head.z - mouth.z)).toBeGreaterThan(1500);
+    // Floor: low near the mouth, rising toward the head; lake in the lower third.
+    expect(gen.heightAt(path[1].x, path[1].z)).toBeLessThan(20);
+    expect(gen.heightAt(path[3].x, path[3].z)).toBeLessThan(0); // the lake
+    expect(gen.heightAt(path[8].x, path[8].z)).toBeGreaterThan(40);
+    // Walls: 1 km either side of the mid point stands far above the floor.
+    const ax = head.x - mouth.x, az = head.z - mouth.z, l = Math.hypot(ax, az), nx = -az / l, nz = ax / l;
+    const floor = gen.heightAt(mid.x, mid.z);
+    for (const side of [-1, 1]) expect(gen.heightAt(mid.x + nx * 1000 * side, mid.z + nz * 1000 * side)).toBeGreaterThan(floor + 250);
+    expect(gen.valleyAt(mid.x, mid.z).mask).toBeGreaterThan(0.95);
+    expect(gen.valleyAt(mid.x + nx * 1200, mid.z + nz * 1200).mask).toBe(0);
+    // Deterministic per seed and part of the same layout: identical across instances.
+    const other = new WorldGen(1207);
+    expect(other.valleyPath(4)).toEqual(gen.valleyPath(4));
   });
   it('places wildflower kinds inside meadow patches only', () => {
     // A chunk over the meadow patch found near the opening position vs. a wetland chunk.
@@ -84,7 +102,7 @@ describe('scenery', () => {
   it('adds balloons over gentle land and sailboats on open water within the budget', () => {
     const budget = wildlifeBudget('lively', 'high');
     expect(budget).toMatchObject({ balloons: 3, boats: 5 });
-    expect(wildlifeBudget('off', 'high')).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0 });
+    expect(wildlifeBudget('off', 'high')).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0, fish: 0 });
     const world = new Wildlife(gen, (x, z) => Math.max(0, gen.heightAt(x, z)));
     for (let i = 0; i < 140; i++) world.update(i / 60, -4710, 200, 7117, 0, 0, 'lively', 'high');
     expect(world.counts().balloons).toBeGreaterThan(0);
@@ -92,6 +110,7 @@ describe('scenery', () => {
     for (let i = 0; i < 140; i++) world.update(10 + i / 60, -6585, 60, 12523, 0, 0, 'lively', 'high');
     const sea = world.counts();
     expect(sea.boats).toBeGreaterThan(0); expect(sea.boats).toBeLessThanOrEqual(budget.boats);
+    expect(sea.fish).toBeGreaterThan(0); expect(sea.fish).toBeLessThanOrEqual(budget.fish);
     world.dispose();
   });
 });

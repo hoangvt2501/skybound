@@ -47,7 +47,8 @@ Open `?seed=<number or text>` to fly a specific world. `?seed=…&fresh=1` disca
 | **M** | World map (pauses the flight) |
 | **R** | Recover to a validated safe airborne position nearby |
 | **H** | Controls help |
-| **Esc** | Close the active overlay (map, help, Settings), otherwise pause/resume |
+| **P** | Photo mode: the flight pauses, the HUD hides, drag and wheel frame the shot, sliders set the lens and the time of day, Enter saves a PNG, Esc returns |
+| **Esc** | Close the active overlay (map, help, Settings, photo mode), otherwise pause/resume |
 | **Settings** button (bottom-left) | Open Settings during flight; the flight pauses and resumes when it closes |
 | **F3** | Developer overlay |
 
@@ -57,7 +58,9 @@ No input = the bird keeps gliding with gentle drag and slow altitude loss. Divin
 
 **World map** (M or the minimap): left-drag pans (the view is kept when you close and reopen), a short click (under 6 px of movement) places the waypoint or selects a discovered landmark, wheel/trackpad zoom is anchored under the pointer, **+ / −** zoom, **Center on bird** keeps the zoom, **Fit region** frames the 32 km region, arrow keys pan while the map has focus. One finger pans on touch, two fingers pinch-zoom around their midpoint; a pinch never places a waypoint. Flight stays paused while the map is open, and closing returns to the state you came from (paused or flying).
 
-Settings has an **Auto-center camera** toggle (off by default) that eases the view back behind the bird after a short idle time.
+Settings has an **Auto-center camera** toggle (off by default) that eases the view back behind the bird after a short idle time, and a **Same handling for every bird** toggle for players who want a different look without relearning the feel: with it on, every species flies with the default profile and only the silhouette, colours and wingbeat change.
+
+**Photo mode** (P, or the camera button on touch) freezes the flight and the time of day, hides the HUD and lets you frame a shot: drag to orbit, wheel for distance, a lens slider from 18° to 100°, a time-of-day slider, a hide-the-bird toggle. Enter (or the Capture button) saves a PNG of the current frame at the rendered resolution; Esc returns to the flight exactly where it paused.
 
 **Settings** (from the start screen, the pause menu or the in-flight button) is a scrollable dialog that always sits above the other overlays: it takes focus when it opens, Tab stays inside it, Esc closes it and focus returns to the control that opened it. It holds the bird picker (four illustrated cards: **Eagle**, **Gull**, **Swallow**, **Owl**, each with its own silhouette, colours, wingbeat and handling: speed, agility, glide and flap power differ by up to about a third, the controls stay the same), the music style (**Sunny stroll**, **Meadow waltz**, **Island breeze**, **Calm pad**, **Off**: procedural tunes that start playing the moment you pick one), the soundscape mixer (master, nature & wind, music, wings & discoveries, mute), the ambient life density (**Off**, **Subtle**, **Lively**) and the **Changing skies** toggle.
 
@@ -67,11 +70,13 @@ Settings has an **Auto-center camera** toggle (off by default) that eases the vi
 - Six biome families with smooth transitions driven by elevation, temperature, moisture and shoreline distance: temperate forest & meadow, alpine mountains with elevation-based snow, coast/ocean/islands, arid plateau & canyons, wetlands & lakes, flowering uplands.
 - 15 deterministic landmarks of 8 types (stone arch, lighthouse, cliffside ruins, giant tree, mountain shrine, canyon bridge, standing stones, watchtower), each with a stable id, name, position, colliders and a discovery radius. Discovery adds them to the journal and the map.
 - Water at global sea level (lakes are inland basins below sea level, coast and islands). Rivers are intentionally not shipped: coastlines and lakes first.
-- Day/night cycle with sun, moon and stars, cumulus clusters built from sorted billboard puffs (lit tops, shaded undersides) under a thin cirrus sheet, distance fog matched to the sky, animated water with surf only on exposed shores and calm lakes.
+- A mist valley between the wetland coast and the mountain spine: a 1 km wide floor that climbs gently toward the spine between two flanks 500-600 m tall, a long lake on the floor, low fog banks that thicken at dawn and dusk, and sun rays that slant between the flanks when the sun sits low along the valley. Inside the valley the fog closes in and takes a cool tint.
+- Rising air you can feel: thermals over sun-warmed meadows, uplands and arid ground during the day, and ridge lift on slopes that face the prevailing wind. Both add vertical speed to the bird; a thermal is hinted by warm dust motes spiralling up its core and by flocks circling inside it, and the HUD shows a lift pill with a soft variometer chirp when you are in one. No mission rings.
+- Day/night cycle with sun, moon and stars, cumulus clusters built from sorted billboard puffs (lit tops, shaded undersides) under a thin cirrus sheet, distance fog matched to the sky, animated water: a rolling swell with whitecaps on the open sea, surf only on exposed shores, calm lakes. Water is not a wall: a shallow pass skims the surface with spray, ripple rings and a hiss, a steep dive plunges under, sheds speed and pops back up under buoyancy, each with its own splash sound; shoals of fish leap near the bird.
 - A procedural Web Audio soundscape with separate buses: a bright, gusting band of air plus a low rush that only grows with speed, soft wingbeats, water that fades in near shores and lakes, sparse daytime birdsong, and a music box that composes short cheerful tunes on the fly (major keys, pentatonic melodies, four-chord loops, plucked or mallet leads, light percussion) in three styles plus a calm pad. No audio files are shipped.
-- Ambient life: small flocks circling over the land, deer resting in meadows and uplands, ducks swimming on ponds, hot-air balloons drifting above gentle country and sailboats on open water. Encounters are deterministic per seed, prepared one habitat per frame, animated on the GPU, purely decorative (no colliders), and capped per density setting.
+- Ambient life: small flocks circling over the land, deer resting in meadows and uplands, ducks swimming on ponds, hot-air balloons drifting above gentle country, sailboats on open water and leaping fish on any water deeper than a few metres. Encounters are deterministic per seed, prepared one habitat per frame, animated on the GPU, purely decorative (no colliders), and capped per density setting.
 - Wildflower patches (poppies, daisies, lupines) on meadows and uplands, boulders on alpine, arid and upland slopes, and slowly changing skies: haze and cloud cover drift over minutes so the same route never looks quite the same.
-- Terrain shading is procedural per pixel: rock on steep faces with strata and cracks, snow that collects on shelves, wet banks, distance-aware grain. Trees have trunks, branches and layered crowns near the camera, billboard impostors further out, and grass tufts in the near field; trees are placed at a fixed density on every preset so collision is identical.
+- Terrain shading is procedural per pixel: rock on steep faces with strata and cracks, snow that collects on shelves, wet banks, distance-aware grain. Trees have trunks, branches and layered crowns near the camera, billboard impostors further out, and grass tufts in the near field; trees are placed at a fixed density on every preset so collision is identical. Vegetation and impostors dissolve in and out over 0.7 s (a screen-door fade) instead of popping, and chunks are requested ahead along the flight direction so the detailed tier is usually in place before it comes into view.
 
 Every seed gives a different island with the same geographic structure (a mountain spine, an arid quarter, a wetland coast, an upland quarter), so all six biomes are always reachable. The showcase seed is `1207`.
 
@@ -161,21 +166,21 @@ The app uses module workers (`type: 'module'`), which every current browser supp
 
 ## Verification
 
-Every change is checked three ways before it is deployed: `npm run typecheck` and `npm test` (Vitest: world generation determinism, chunk edges, map transforms, flight model, persistence and migration, floating origin, settings dialog, bird profiles, ambient life, scenery rules) run in the GitHub Pages workflow before every build; `npm run test:e2e` (Playwright: desktop smoke and interaction flows, Pixel 7 touch emulation) and real-GPU benchmarks on a fixed autopilot route are run locally on an integrated Intel GPU. Frame times, attribution runs and screenshots from those checks live in the commit messages rather than in the repository.
+Every change is checked three ways before it is deployed: `npm run typecheck` and `npm test` (Vitest: world generation determinism, chunk edges, map transforms, flight model, persistence and migration, floating origin, settings dialog, bird profiles, ambient life, scenery rules, water contact, thermals and ridge lift) run in the GitHub Pages workflow before every build; `npm run test:e2e` (Playwright: desktop smoke and interaction flows, Pixel 7 touch emulation) and real-GPU benchmarks on a fixed autopilot route are run locally on an integrated Intel GPU. Frame times, attribution runs and screenshots from those checks live in the commit messages rather than in the repository.
 
 Performance note: the frame is fill-rate bound on integrated GPUs. Adaptive resolution (on by default) counts missed display refreshes and settles at the highest render scale that keeps every frame inside one refresh; on an integrated Intel GPU at 1080p that is about 0.7-0.9 scale at a steady 58-60 fps on medium. Turning it off pins the scale at the preset cap (about 44 fps there on medium).
 
 ## Limitations
 
-- Water is a single global level: no rivers, no elevated lakes yet.
+- Water is a single global level: no rivers, no elevated lakes yet. The swell is visual only: flight contact uses the flat surface.
 - The procedural music is composed from rules, not authored; it will not sound like a recorded soundtrack.
-- Full tree geometry switches to billboard impostors at the LOD1 boundary (~1 km) and impostors end at ~3.5 km; both transitions are pops softened by distance and fog, not cross-fades.
+- Full tree geometry switches to billboard impostors at the LOD1 boundary (~1 km) and impostors end at ~3.5 km; the switches are dissolved over 0.7 s, but the terrain mesh itself still changes resolution at ring boundaries without a fade.
 - Cloud puffs are camera-facing sprites: convincing from below, beside and above, but a cloud seen from very close is a soft fade rather than a true volume.
 - Distant terrain (far shell) is coarse and deliberately sunk 14 m; where the detailed tier is still loading, the far shell shows through briefly.
 - Shadows cover a ±220 m box around the bird only.
 - WebGPU is not used; the renderer is WebGL2 only.
 - No gamepad support yet.
-- Ambient animals, balloons and boats are low-poly instanced decorations on fixed circles, not autonomous agents; "changing skies" varies haze and cloud cover but there is no rain, wind field, photo mode or ring course.
+- Ambient animals, balloons and boats are low-poly instanced decorations on fixed circles, not autonomous agents; "changing skies" varies haze and cloud cover but there is no rain or ring course. The wind is a fixed direction used for lift, trees and clouds, not a simulated field.
 
 ## Attribution
 

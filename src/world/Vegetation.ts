@@ -22,7 +22,23 @@ import { SPECIES_COUNT, Species } from './biomes';
 // Materials
 // ---------------------------------------------------------------------------
 
+const DISSOLVE_FRAG = /* glsl */ `
+  varying float vLifeFade;
+`;
+const DISSOLVE_TEST = /* glsl */ `
+  if (vLifeFade < 0.999) {
+    // Screen-door dissolve: instances appear and vanish as a grain that fills in over 0.7 s
+    // instead of popping whole.
+    float grain = fract(sin(dot(floor(gl_FragCoord.xy), vec2(12.9898, 78.233))) * 43758.5453);
+    if (grain > vLifeFade) discard;
+  }
+`;
+
 const VEG_VERTEX_HEAD = /* glsl */ `
+  attribute vec2 aLife;     // x: birth time, y: death time (1e9 = alive)
+  varying float vLifeFade;
+  uniform float uLifeTime;
+
   attribute vec2 aVeg;      // x: sway weight (0 base .. 1 crown top), y: crown mask
   attribute float aRand;    // per-instance random 0..1
   uniform float uTime;
@@ -39,6 +55,14 @@ const VEG_VERTEX_HEAD = /* glsl */ `
 
 const VEG_VERTEX_BODY = /* glsl */ `
   {
+    #ifdef USE_INSTANCING
+      float lifeIn = clamp((uLifeTime - aLife.x) / 0.7, 0.0, 1.0);
+      float lifeOut = aLife.y > uLifeTime ? 1.0 : clamp(1.0 - (uLifeTime - aLife.y) / 0.7, 0.0, 1.0);
+      vLifeFade = lifeIn * lifeOut;
+    #else
+      vLifeFade = 1.0;
+    #endif
+
     float crown = aVeg.y;
     float sway = aVeg.x;
     // Per-instance crown irregularity along the (smooth) normal.
@@ -63,38 +87,54 @@ const VEG_VERTEX_BODY = /* glsl */ `
   }
 `;
 
+export interface VegUniforms {
+  uTime: { value: number };
+  uLifeTime: { value: number };
+  uWind: { value: THREE.Vector2 };
+  uWindStrength: { value: number };
+}
+
 export class VegetationMaterial extends THREE.MeshLambertMaterial {
-  readonly vegUniforms = {
-    uTime: { value: 0 },
-    uWind: { value: new THREE.Vector2(0.8, 0.6) },
-    uWindStrength: { value: 0.45 },
-  };
-  constructor() {
+  readonly vegUniforms: VegUniforms;
+  /**
+   * `dissolve` compiles in the screen-door test (a fragment discard, which costs early depth
+   * rejection); the settled twin leaves it out. Twins share one uniform set.
+   */
+  constructor(readonly dissolve = false, uniforms?: VegUniforms) {
     super({ vertexColors: true });
+    this.vegUniforms = uniforms ?? { uTime: { value: 0 }, uLifeTime: { value: 0 }, uWind: { value: new THREE.Vector2(0.8, 0.6) }, uWindStrength: { value: 0.45 } };
     this.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = this.vegUniforms.uTime;
+      shader.uniforms.uLifeTime = this.vegUniforms.uLifeTime;
       shader.uniforms.uWind = this.vegUniforms.uWind;
       shader.uniforms.uWindStrength = this.vegUniforms.uWindStrength;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>\n${VEG_VERTEX_HEAD}`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>\n${VEG_VERTEX_BODY}`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}`)
+        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`);
     };
-    this.customProgramCacheKey = () => 'skybound-veg-v1';
+    this.customProgramCacheKey = () => `skybound-veg-v3-${this.dissolve ? 'd' : 's'}`;
   }
 }
 
 /** Alpha-tested billboard material for impostors and ground cover with distance fade. */
+export interface BillboardUniforms {
+  uTime: { value: number };
+  uLifeTime: { value: number };
+  uWind: { value: THREE.Vector2 };
+  uTiles: { value: number };
+  uFadeStart: { value: number };
+  uFadeEnd: { value: number };
+  uSway: { value: number };
+}
+
 class BillboardMaterial extends THREE.MeshLambertMaterial {
-  readonly bbUniforms = {
-    uTime: { value: 0 },
-    uWind: { value: new THREE.Vector2(0.8, 0.6) },
-    uTiles: { value: 8 },
-    uFadeStart: { value: 100000 },
-    uFadeEnd: { value: 100001 },
-    uSway: { value: 0 },
-  };
-  constructor(map: THREE.Texture, tiles: number, fadeStart: number, fadeEnd: number, sway: number) {
+  readonly bbUniforms: BillboardUniforms;
+  constructor(map: THREE.Texture, tiles: number, fadeStart: number, fadeEnd: number, sway: number, readonly dissolve = false, uniforms?: BillboardUniforms) {
     super({ map, alphaTest: 0.45, side: THREE.DoubleSide, transparent: false });
+    this.bbUniforms = uniforms ?? { uTime: { value: 0 }, uLifeTime: { value: 0 }, uWind: { value: new THREE.Vector2(0.8, 0.6) }, uTiles: { value: 8 }, uFadeStart: { value: 100000 }, uFadeEnd: { value: 100001 }, uSway: { value: 0 } };
     this.bbUniforms.uTiles.value = tiles;
     this.bbUniforms.uFadeStart.value = fadeStart;
     this.bbUniforms.uFadeEnd.value = fadeEnd;
@@ -107,6 +147,10 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
           `#include <common>
           attribute float aTile;
           attribute float aRand;
+  attribute vec2 aLife;     // x: birth time, y: death time (1e9 = alive)
+  varying float vLifeFade;
+          uniform float uLifeTime;
+
           uniform float uTiles;
           uniform float uFadeStart;
           uniform float uFadeEnd;
@@ -131,11 +175,22 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
             #endif
             float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, d);
             transformed *= fade;
+    #ifdef USE_INSTANCING
+      float lifeIn = clamp((uLifeTime - aLife.x) / 0.7, 0.0, 1.0);
+      float lifeOut = aLife.y > uLifeTime ? 1.0 : clamp(1.0 - (uLifeTime - aLife.y) / 0.7, 0.0, 1.0);
+      vLifeFade = lifeIn * lifeOut;
+    #else
+      vLifeFade = 1.0;
+    #endif
+
             float phase = aRand * 6.28 + ip.x * 0.05 + ip.z * 0.07;
             float g = sin(uTime * 1.3 + phase) * 0.7 + sin(uTime * 3.1 + phase * 1.7) * 0.3;
             transformed.xz += uWind * g * uSway * position.y * position.y;
           }`,
         );
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}`)
+        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`);
       // Billboards are lit as if facing up, on both sides (no back-face darkening).
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <normal_fragment_begin>',
@@ -144,7 +199,7 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
         nonPerturbedNormal = normal;`,
       );
     };
-    this.customProgramCacheKey = () => `skybound-bb-${tiles}-${sway}`;
+    this.customProgramCacheKey = () => `skybound-bb3-${tiles}-${sway}-${this.dissolve ? 'd' : 's'}`;
   }
 }
 
@@ -703,6 +758,11 @@ export class VegetationLibrary {
   readonly impostorGeometry: THREE.BufferGeometry;
   readonly coverMaterial: BillboardMaterial;
   readonly coverGeometry: THREE.BufferGeometry;
+  /** Dissolving twins: used while instances are appearing or vanishing, then swapped for the settled material. */
+  readonly materialFading: VegetationMaterial;
+  readonly impostorMaterialFading: BillboardMaterial;
+  readonly coverMaterialFading: BillboardMaterial;
+  private twins = new Map<THREE.Material, { fading: THREE.Material; settled: THREE.Material }>();
   private geometries: THREE.BufferGeometry[][] = [];
   private impostorTexture: THREE.Texture;
   private grassTexture: THREE.Texture;
@@ -722,7 +782,17 @@ export class VegetationLibrary {
     this.grassTexture = paintGrassAtlas();
     this.coverMaterial = new BillboardMaterial(this.grassTexture, COVER_TILES, 110, 170, 0.12);
     this.coverGeometry = crossQuads();
+    this.materialFading = new VegetationMaterial(true, this.material.vegUniforms);
+    this.impostorMaterialFading = new BillboardMaterial(this.impostorTexture, IMPOSTOR_TILES, 100000, 100001, 0, true, this.impostorMaterial.bbUniforms);
+    this.coverMaterialFading = new BillboardMaterial(this.grassTexture, COVER_TILES, 110, 170, 0.12, true, this.coverMaterial.bbUniforms);
+    for (const [settled, fading] of [[this.material, this.materialFading], [this.impostorMaterial, this.impostorMaterialFading], [this.coverMaterial, this.coverMaterialFading]] as const) {
+      this.twins.set(settled, { fading, settled });
+      this.twins.set(fading, { fading, settled });
+    }
   }
+
+  fadingTwin(m: THREE.Material): THREE.Material { return this.twins.get(m)?.fading ?? m; }
+  settledTwin(m: THREE.Material): THREE.Material { return this.twins.get(m)?.settled ?? m; }
 
   variants(species: Species): number {
     return this.geometries[species].length;
@@ -733,20 +803,26 @@ export class VegetationLibrary {
     return list[variant % list.length];
   }
 
-  /** Advance wind animation. */
-  update(time: number, windX: number, windZ: number): void {
+  /** Advance wind animation (simulation clock) and the dissolve clock (wall clock, so fades finish while paused). */
+  update(time: number, windX: number, windZ: number, lifeTime: number): void {
     this.material.vegUniforms.uTime.value = time;
+    this.material.vegUniforms.uLifeTime.value = lifeTime;
     this.material.vegUniforms.uWind.value.set(windX, windZ);
     this.coverMaterial.bbUniforms.uTime.value = time;
+    this.coverMaterial.bbUniforms.uLifeTime.value = lifeTime;
     this.coverMaterial.bbUniforms.uWind.value.set(windX, windZ);
+    this.impostorMaterial.bbUniforms.uLifeTime.value = lifeTime;
   }
 
   dispose(): void {
     for (const list of this.geometries) for (const g of list) g.dispose();
     this.material.dispose();
+    this.materialFading.dispose();
     this.impostorMaterial.dispose();
+    this.impostorMaterialFading.dispose();
     this.impostorGeometry.dispose();
     this.coverMaterial.dispose();
+    this.coverMaterialFading.dispose();
     this.coverGeometry.dispose();
     this.impostorTexture.dispose();
     this.grassTexture.dispose();

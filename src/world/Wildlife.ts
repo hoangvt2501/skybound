@@ -7,14 +7,15 @@ import { hash2, Rng } from './noise';
 import { createTerrainSample, type WorldGen } from './WorldGen';
 
 export type WildlifeMode = 'off' | 'subtle' | 'lively';
-export interface WildlifeCounts { birds: number; deer: number; ducks: number; balloons: number; boats: number }
+export interface WildlifeCounts { birds: number; deer: number; ducks: number; balloons: number; boats: number; fish: number }
 export function wildlifeBudget(mode: WildlifeMode, quality: QualityPreset): WildlifeCounts {
-  if (mode === 'off') return { birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0 };
+  if (mode === 'off') return { birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0, fish: 0 };
   const factor = quality === 'low' ? 0.6 : 1;
   const lively = mode === 'lively';
   return {
     birds: Math.round((lively ? 32 : 16) * factor), deer: Math.round((lively ? 12 : 6) * factor), ducks: Math.round((lively ? 16 : 8) * factor),
     balloons: lively ? 3 : 2, boats: Math.round((lively ? 5 : 3) * factor),
+    fish: Math.round((lively ? 16 : 8) * factor),
   };
 }
 
@@ -28,14 +29,14 @@ export function habitatAt(height: number, slope: number, biome: Biome): Habitat 
   return null;
 }
 
-type Kind = 'bird' | 'deer' | 'duck' | 'balloon' | 'boat';
-const KINDS: readonly Kind[] = ['bird', 'deer', 'duck', 'balloon', 'boat'];
+type Kind = 'bird' | 'deer' | 'duck' | 'balloon' | 'boat' | 'fish';
+const KINDS: readonly Kind[] = ['bird', 'deer', 'duck', 'balloon', 'boat', 'fish'];
 interface Encounter { x: number; y: number; z: number; phase: number; kind: Kind; count: number; radius: number }
 type JobKind = 'ground' | 'air' | 'balloon';
-const CAPACITY: Record<Kind, number> = { bird: 32, deer: 12, duck: 16, balloon: 3, boat: 5 };
-const MAX_DISTANCE: Record<Kind, number> = { bird: 1600, deer: 550, duck: 550, balloon: 2800, boat: 1400 };
-const KIND_SCALE: Record<Kind, number> = { bird: 1.5, deer: 1, duck: 1, balloon: 1, boat: 1 };
-const BUDGET_KEY: Record<Kind, keyof WildlifeCounts> = { bird: 'birds', deer: 'deer', duck: 'ducks', balloon: 'balloons', boat: 'boats' };
+const CAPACITY: Record<Kind, number> = { bird: 32, deer: 12, duck: 16, balloon: 3, boat: 5, fish: 16 };
+const MAX_DISTANCE: Record<Kind, number> = { bird: 1600, deer: 550, duck: 550, balloon: 2800, boat: 1400, fish: 420 };
+const KIND_SCALE: Record<Kind, number> = { bird: 1.5, deer: 1, duck: 1, balloon: 1, boat: 1, fish: 1.7 };
+const BUDGET_KEY: Record<Kind, keyof WildlifeCounts> = { bird: 'birds', deer: 'deer', duck: 'ducks', balloon: 'balloons', boat: 'boats', fish: 'fish' };
 /** Instance buffers per kind. A rebuild writes the slot drawn longest ago, so the GPU is never reading the buffer being written. */
 const RING = 3;
 /** Player travel that triggers a new nearest-encounter selection. */
@@ -72,6 +73,12 @@ function geometry(kind: Kind): THREE.BufferGeometry {
     for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
       const rope = new THREE.CylinderGeometry(0.06, 0.06, 3.2, 4); rope.translate(sx * 1.0, 3.6, sz * 1.0); paint(rope, 0x4c4038, 5);
     }
+  } else if (kind === 'fish') {
+    // Silver fish about 0.6 m long, nose toward -Z, forked tail; the leap arc is evaluated in the shader (aMotion 6).
+    ellipsoid(0, 0, 0, 0.09, 0.12, 0.3, 0xe6eef2, 6);
+    ellipsoid(0, 0.05, 0.05, 0.06, 0.08, 0.22, 0x5b8aa6, 6);
+    const tail = new THREE.ConeGeometry(0.11, 0.18, 3); tail.rotateX(Math.PI / 2); tail.translate(0, 0, 0.36); paint(tail, 0xa9bcc7, 6);
+    const fin = new THREE.ConeGeometry(0.05, 0.12, 3); fin.translate(0, 0.14, -0.02); paint(fin, 0xa9bcc7, 6);
   } else if (kind === 'boat') {
     // Hull with a narrowed bow (-Z), deck, mast, main and jib sails.
     const hull = new THREE.BoxGeometry(2.8, 1.3, 8.4, 1, 1, 4);
@@ -126,7 +133,7 @@ function geometry(kind: Kind): THREE.BufferGeometry {
 export class Wildlife {
   readonly group = new THREE.Group();
   private rings: Record<Kind, THREE.InstancedMesh[]>;
-  private active: Record<Kind, number> = { bird: 0, deer: 0, duck: 0, balloon: 0, boat: 0 };
+  private active: Record<Kind, number> = { bird: 0, deer: 0, duck: 0, balloon: 0, boat: 0, fish: 0 };
   private materials: THREE.Material[] = [];
   private clock = { value: 0 };
   private encounters = new Map<string, Encounter | null>();
@@ -142,9 +149,15 @@ export class Wildlife {
   private builtZ = NaN;
   private builtOX = NaN;
   private builtOZ = NaN;
+  /** Fish instances currently drawn, for the CPU-side launch/landing splashes. */
+  private fishInstances: { x: number; z: number; heading: number; len: number; rate: number; phase: number; cycle: number }[] = [];
+  /** Nearest thermal to a point within a radius, if any; flocks prefer to circle in it. */
+  thermalFinder: ((x: number, z: number, radius: number) => { x: number; z: number; radius: number; base: number; top: number } | null) | null = null;
+  /** Called when a fish breaks the surface (landing = true when it falls back in). */
+  onFishSplash: ((x: number, z: number, landing: boolean) => void) | null = null;
 
   constructor(private gen: WorldGen, private surfaceAt: (x: number, z: number) => number) {
-    this.rings = { bird: this.makeRing('bird'), deer: this.makeRing('deer'), duck: this.makeRing('duck'), balloon: this.makeRing('balloon'), boat: this.makeRing('boat') };
+    this.rings = { bird: this.makeRing('bird'), deer: this.makeRing('deer'), duck: this.makeRing('duck'), balloon: this.makeRing('balloon'), boat: this.makeRing('boat'), fish: this.makeRing('fish') };
     this.group.name = 'Ambient wildlife';
   }
 
@@ -171,7 +184,8 @@ export class Wildlife {
         vec3 wildRotate(vec3 v, float heading) { float c = cos(heading), s = sin(heading); return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z); }`);
       shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
         float wildAngle = aOrbit.z + uWildTime * aOrbit.y;
-        float wildHeading = PI - wildAngle; // local -Z forward follows the circle tangent
+        // Local -Z forward follows the circle tangent; leaping fish (aMotion 6) keep a fixed heading.
+        float wildHeading = aMotion > 5.5 ? PI - aOrbit.z : PI - wildAngle;
         objectNormal = wildRotate(objectNormal, wildHeading);`);
       shader.vertexShader = shader.vertexShader.replace('#include <color_vertex>', `#include <color_vertex>
         #ifdef USE_COLOR
@@ -190,15 +204,31 @@ export class Wildlife {
         } else if (aMotion > 2.5 && aMotion < 3.5) {
           transformed.y += sin(uWildTime * 0.9 + aPhase) * 0.22; // sailboat heave
           transformed.x += position.y * sin(uWildTime * 0.7 + aPhase) * 0.06; // and a little roll
-        } else if (aMotion > 3.5) {
+        } else if (aMotion > 3.5 && aMotion < 5.5) {
           transformed.y += sin(uWildTime * 0.3 + aPhase) * 1.6; // balloon drift
         }
         vec3 wildCenter = (modelMatrix * instanceMatrix)[3].xyz;
         float wildFade = 1.0 - smoothstep(uMaxDistance * 0.8, uMaxDistance, distance(cameraPosition, wildCenter));
-        transformed = wildRotate(transformed * wildFade, wildHeading);
-        transformed += vec3(cos(wildAngle) * aOrbit.x, aOrbit.w * sin(uWildTime * 0.4 + aPhase), sin(wildAngle) * aOrbit.x);`);
+        if (aMotion > 5.5) {
+          // Leaping fish (aOrbit: leap length, cycle rate, heading, leap height). For the first third of
+          // each cycle it dashes forward in a parabola, pitching along the arc; the rest it waits 1.4 m down.
+          float cycle = fract(uWildTime * aOrbit.y + aPhase * 0.159);
+          float leaping = step(cycle, 0.32);
+          float leap = clamp(cycle / 0.32, 0.0, 1.0);
+          float up = aOrbit.w * sin(leap * 3.14159);
+          float pitch = (0.5 - leap) * 1.6 * leaping;
+          vec3 shaped = transformed * wildFade;
+          shaped = vec3(shaped.x, shaped.y * cos(pitch) - shaped.z * sin(pitch), shaped.y * sin(pitch) + shaped.z * cos(pitch));
+          transformed = wildRotate(shaped, wildHeading);
+          float along = mix(aOrbit.x * 0.5, (leap - 0.5) * aOrbit.x, leaping);
+          float depth = mix(-1.4, up - 0.7, leaping); // starts and ends 0.7 m under, clears the surface by up to 2.3 m
+          transformed += vec3(-sin(wildHeading) * along, depth, -cos(wildHeading) * along);
+        } else {
+          transformed = wildRotate(transformed * wildFade, wildHeading);
+          transformed += vec3(cos(wildAngle) * aOrbit.x, aOrbit.w * sin(uWildTime * 0.4 + aPhase), sin(wildAngle) * aOrbit.x);
+        }`);
     };
-    material.customProgramCacheKey = () => 'skybound-wildlife-v3';
+    material.customProgramCacheKey = () => 'skybound-wildlife-v4';
     this.materials.push(material);
     const ring: THREE.InstancedMesh[] = [];
     for (let slot = 0; slot < RING; slot++) {
@@ -231,16 +261,23 @@ export class Wildlife {
     const x = (cx + 0.18 + rng.next() * 0.64) * size, z = (cz + 0.18 + rng.next() * 0.64) * size;
     const s = this.gen.sample(x, z, this.sample);
     if (kind === 'air') {
-      const radius = 65 + rng.next() * 80;
-      let y = Math.max(0, s.height);
-      for (let i = 0; i < 8; i++) y = Math.max(y, this.gen.heightAt(x + Math.cos(i * Math.PI / 4) * (radius + 40), z + Math.sin(i * Math.PI / 4) * (radius + 40)));
-      return { kind: 'bird', x, z, y: y + 75 + rng.next() * 80, phase: rng.next() * Math.PI * 2, radius, count: 4 + rng.int(4) };
+      let radius = 65 + rng.next() * 80, fx = x, fz = z, lift = 0;
+      const thermal = this.thermalFinder?.(x, z, 450);
+      if (thermal) { fx = thermal.x; fz = thermal.z; radius = Math.max(45, thermal.radius * 0.8); lift = 120 + rng.next() * 160; }
+      let y = Math.max(0, this.gen.sample(fx, fz, this.sample).height);
+      for (let i = 0; i < 8; i++) y = Math.max(y, this.gen.heightAt(fx + Math.cos(i * Math.PI / 4) * (radius + 40), fz + Math.sin(i * Math.PI / 4) * (radius + 40)));
+      return { kind: 'bird', x: fx, z: fz, y: y + 75 + rng.next() * 80 + lift, phase: rng.next() * Math.PI * 2, radius, count: 4 + rng.int(4) };
     }
-    // Open water: a sailboat on roughly one deep-water cell in six, given 80 m of clear water around its circle.
-    if (s.height < -6) {
-      if (rng.next() > 0.18) return null;
-      for (let i = 0; i < 8; i++) if (this.gen.heightAt(x + Math.cos(i * Math.PI / 4) * 80, z + Math.sin(i * Math.PI / 4) * 80) > -3) return null;
-      return { kind: 'boat', x, z, y: 0, phase: rng.next() * Math.PI * 2, radius: 45, count: 1 };
+    // Water at least 2.5 m deep: open water may hold a sailboat (one deep cell in six, 80 m of clear
+    // water around its circle); otherwise most cells hold a small shoal of leaping fish.
+    if (s.height < -2.5) {
+      if (s.height < -6 && rng.next() < 0.18) {
+        let open = true;
+        for (let i = 0; i < 8 && open; i++) if (this.gen.heightAt(x + Math.cos(i * Math.PI / 4) * 80, z + Math.sin(i * Math.PI / 4) * 80) > -3) open = false;
+        if (open) return { kind: 'boat', x, z, y: 0, phase: rng.next() * Math.PI * 2, radius: 45, count: 1 };
+      }
+      if (rng.next() < 0.7) return { kind: 'fish', x, z, y: 0, phase: rng.next() * Math.PI * 2, radius: 4 + rng.next() * 3, count: 3 + rng.int(3) };
+      return null;
     }
     // Ponds cover only a few percent of a wetland cell, so a single random
     // point almost never lands on water and ducks would be a rarity. Try a few
@@ -295,6 +332,7 @@ export class Wildlife {
     if (job) { this.encounters.set(job.key, this.prepare(job.cx, job.cz, job.kind)); this.dirty = true; }
     const changed = mode !== this.lastMode || quality !== this.lastQuality;
     this.lastMode = mode; this.lastQuality = quality;
+    this.fishSplashes(time);
     const moved = !(Math.hypot(px - this.builtX, pz - this.builtZ) <= REBUILD_DISTANCE);
     const rebased = ox !== this.builtOX || oz !== this.builtOZ;
     const drained = job !== undefined && this.pending.length === 0; // last habitat of a cell change: show it even if the clock is paused
@@ -304,8 +342,9 @@ export class Wildlife {
   /** Select the nearest encounters within budget and write them into the next ring slot of each kind. */
   private rebuild(time: number, px: number, py: number, pz: number, ox: number, oz: number, mode: WildlifeMode, quality: QualityPreset): void {
     this.dirty = false; this.builtAt = time; this.builtX = px; this.builtZ = pz; this.builtOX = ox; this.builtOZ = oz;
-    const budget = wildlifeBudget(mode, quality), used: Record<Kind, number> = { bird: 0, deer: 0, duck: 0, balloon: 0, boat: 0 };
-    const target: Record<Kind, THREE.InstancedMesh> = { bird: this.nextSlot('bird'), deer: this.nextSlot('deer'), duck: this.nextSlot('duck'), balloon: this.nextSlot('balloon'), boat: this.nextSlot('boat') };
+    const budget = wildlifeBudget(mode, quality), used: Record<Kind, number> = { bird: 0, deer: 0, duck: 0, balloon: 0, boat: 0, fish: 0 };
+    this.fishInstances.length = 0;
+    const target: Record<Kind, THREE.InstancedMesh> = { bird: this.nextSlot('bird'), deer: this.nextSlot('deer'), duck: this.nextSlot('duck'), balloon: this.nextSlot('balloon'), boat: this.nextSlot('boat'), fish: this.nextSlot('fish') };
     const sorted = Array.from(this.encounters.values()).filter((e): e is Encounter => e !== null).sort((a, b) => Math.hypot(a.x - px, a.z - pz) - Math.hypot(b.x - px, b.z - pz));
     for (const e of sorted) {
       const max = budget[BUDGET_KEY[e.kind]];
@@ -321,6 +360,11 @@ export class Wildlife {
           radius = e.radius; speed = 0.012; angle0 = e.phase;
         } else if (e.kind === 'boat') {
           radius = e.radius; speed = 0.028; angle0 = e.phase; y = 0.05;
+        } else if (e.kind === 'fish') {
+          // aOrbit for fish: leap length, cycle rate (Hz), heading, leap height. Members spread out and leap in sequence.
+          x += Math.cos(e.phase + j * 1.9) * (2 + j * 1.6); z += Math.sin(e.phase + j * 1.9) * (2 + j * 1.6);
+          radius = e.radius; speed = 0.19 + (j % 3) * 0.03; angle0 = Math.PI - (e.phase + j * 0.35); bob = 2.3 + (j % 2) * 0.7; y = 0;
+          this.fishInstances.push({ x, z, heading: e.phase + j * 0.35, len: radius, rate: speed, phase: e.phase + j, cycle: -1 });
         } else {
           x += j * 3.2; z += j * 2; y = this.surfaceAt(x, z);
           if (y <= 1) continue;
@@ -339,6 +383,19 @@ export class Wildlife {
     }
   }
 
+  /** Mirror of the shader's leap cycle: a ring when a fish launches (cycle wraps) and a splash when it lands (cycle passes 0.32). */
+  private fishSplashes(time: number): void {
+    if (!this.onFishSplash) return;
+    for (const f of this.fishInstances) {
+      const cycle = ((time * f.rate + f.phase * 0.159) % 1 + 1) % 1;
+      const prev = f.cycle; f.cycle = cycle;
+      if (prev < 0) continue;
+      const at = (leap: number) => ({ x: f.x - Math.sin(f.heading) * (leap - 0.5) * f.len, z: f.z - Math.cos(f.heading) * (leap - 0.5) * f.len });
+      if (cycle < prev) { const p = at(0); this.onFishSplash(p.x, p.z, false); }
+      else if (prev < 0.32 && cycle >= 0.32) { const p = at(1); this.onFishSplash(p.x, p.z, true); }
+    }
+  }
+
   private nextSlot(kind: Kind): THREE.InstancedMesh {
     this.active[kind] = (this.active[kind] + 1) % RING;
     return this.rings[kind][this.active[kind]];
@@ -347,8 +404,8 @@ export class Wildlife {
   private activeMesh(kind: Kind): THREE.InstancedMesh { return this.rings[kind][this.active[kind]]; }
 
   counts(): WildlifeCounts {
-    if (!this.group.visible) return { birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0 };
-    return { birds: this.activeMesh('bird').count, deer: this.activeMesh('deer').count, ducks: this.activeMesh('duck').count, balloons: this.activeMesh('balloon').count, boats: this.activeMesh('boat').count };
+    if (!this.group.visible) return { birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0, fish: 0 };
+    return { birds: this.activeMesh('bird').count, deer: this.activeMesh('deer').count, ducks: this.activeMesh('duck').count, balloons: this.activeMesh('balloon').count, boats: this.activeMesh('boat').count, fish: this.activeMesh('fish').count };
   }
   dispose(): void {
     for (const kind of KINDS) for (const mesh of this.rings[kind]) { mesh.geometry.dispose(); mesh.dispose(); }

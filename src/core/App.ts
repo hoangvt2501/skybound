@@ -14,8 +14,14 @@ import { BIRD_SPECIES } from '../flight/BirdSpecies';
 import { Wildlife } from '../world/Wildlife';
 import { BirdModel } from '../flight/Bird';
 import { renderBirdPortraits } from '../ui/BirdPortraits';
+import { PhotoPanel } from '../ui/PhotoPanel';
+import { SplashEffects } from '../atmosphere/Splash';
+import { LightShafts } from '../atmosphere/LightShafts';
+import { Airflow, type Thermal } from '../flight/Airflow';
+import { ThermalMotes } from '../atmosphere/ThermalMotes';
+import { hash2, Rng } from '../world/noise';
 import { CameraRig } from '../flight/CameraRig';
-import { createFlightState, copyFlightState, emptyInput, FlightController, type FlightInput, type FlightState, type TerrainQuery, findSafeAirborne } from '../flight/FlightController';
+import { createFlightState, copyFlightState, emptyInput, FlightController, type FlightInput, type FlightState, type TerrainQuery, findSafeAirborne, DEFAULT_PROFILE } from '../flight/FlightController';
 import { InputManager } from '../flight/Input';
 import { Minimap } from '../map/Minimap';
 import { TileCache } from '../map/TileCache';
@@ -35,7 +41,7 @@ import { bearingTo, wrapAngle } from '../world/coords';
 import { LandmarkManager } from '../world/Landmarks';
 import { Origin } from '../world/Origin';
 import { VegetationLibrary } from '../world/Vegetation';
-import { WorldGen } from '../world/WorldGen';
+import { WorldGen, createTerrainSample } from '../world/WorldGen';
 import { FixedStepClock } from './Clock';
 import { FLIGHT, QUALITY_PRESETS, SAVE_VERSION, SEA_LEVEL, WAYPOINT_ARRIVE_RADIUS, WORLD_GEN_VERSION, type QualitySettings } from './config';
 import { Navigation } from './Navigation';
@@ -51,7 +57,7 @@ export interface AppOptions {
   migrated?: boolean;
 }
 
-type Phase = 'loading' | 'start' | 'flying' | 'paused';
+type Phase = 'loading' | 'start' | 'flying' | 'paused' | 'photo';
 
 const _v = new THREE.Vector3();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -82,6 +88,21 @@ export class App {
   private veg: VegetationLibrary;
   private bird: BirdModel;
   private wildlife: Wildlife;
+  private splash: SplashEffects;
+  private shafts: LightShafts;
+  private photoPanel: PhotoPanel;
+  private photoHideBird = false;
+  private lastPhotoBytes = 0;
+  private airflow: Airflow;
+  private motes: ThermalMotes;
+  private liftSample = { total: 0, thermal: 0, ridge: 0, nearest: null as Thermal | null };
+  private thermalScratch: Thermal[] = [];
+  private valleyAxis = new THREE.Vector2(0, -1);
+  private valleyScratch = { mask: 0, t: 0, dist: 0 };
+  private valleyReady = false;
+  /** Diagnostic switches (debug hooks) for same-session cost attribution. */
+  private diag = { mist: true, lookahead: true };
+  private lastSkimRing = 0;
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
   private fog: THREE.Fog;
@@ -181,9 +202,26 @@ export class App {
       },
     };
     this.flight = new FlightController(terrain);
-    this.flight.setProfile(BIRD_SPECIES[this.settings.birdSpecies].profile);
+    this.flight.setProfile(this.profileFor(this.settings));
     this.autopilot = new Autopilot(terrain, (opts.seed % 1000) / 100);
     this.flight.onImpact = (speed, kind) => this.onImpact(speed, kind);
+    this.splash = new SplashEffects();
+    this.scene.add(this.splash.group);
+    this.shafts = new LightShafts(12);
+    this.scene.add(this.shafts.mesh);
+    this.airflow = new Airflow(this.gen);
+    this.flight.airflow = (x, y, z) => this.airflow.lift(x, y, z, this.day.time, this.liftSample).total;
+    this.motes = new ThermalMotes();
+    this.scene.add(this.motes.points);
+    this.flight.onWater = (event, speed, steepness) => {
+      if (event !== 'enter') return;
+      const s = this.flight.state, dir = Math.sin(s.heading), dirZ = -Math.cos(s.heading);
+      const strength = Math.min(1, 0.25 + speed / 70 * 0.5 + steepness * 0.6);
+      this.splash.splash(s.x, s.z, strength, dir, dirZ, speed);
+      this.audio.splash(strength);
+      this.cameraRig.addShake(0.15 + strength * 0.4);
+      this.hud.toast(steepness > 0.45 ? 'Splash! Pull up.' : 'Skimming the water.', 'warn', 1400);
+    };
 
     // Bird & camera.
     this.bird = new BirdModel(this.settings.birdSpecies);
@@ -191,6 +229,8 @@ export class App {
     this.scene.add(this.bird.group);
     this.wildlife = new Wildlife(this.gen, (x, z) => this.chunks.surfaceAt(x, z));
     this.scene.add(this.wildlife.group);
+    this.wildlife.onFishSplash = (x, z, landing) => { if (landing) this.splash.splash(x, z, 0.12); else this.splash.ring(x, z, 0.7); };
+    this.wildlife.thermalFinder = (x, z, r) => this.airflow.thermalsNear(x, z, r, this.thermalScratch)[0] ?? null;
     this.cameraRig = new CameraRig(this.camera, {
       surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
       forEachObstacleNear: (x, z, r, cb) => terrain.forEachObstacleNear(x, z, r, cb),
@@ -232,6 +272,14 @@ export class App {
     this.tiles = new TileCache(this.chunks.workerPool);
     this.hud = new HUD(ui);
     this.hud.onSettings = () => this.openSettings();
+    this.hud.onPhoto = () => { if (this.phase === 'flying' && !this.worldMap.isOpen) this.enterPhoto(); };
+    this.photoPanel = new PhotoPanel(ui, {
+      onCapture: () => this.capturePhoto(),
+      onExit: () => this.exitPhoto(),
+      onFov: (fov) => { this.cameraRig.fovOverride = fov; },
+      onTime: (t) => { this.day.setTime(t); },
+      onHideBird: (hide) => { this.photoHideBird = hide; this.bird.group.visible = !hide; },
+    });
     this.hud.onResetView = () => this.cameraRig.resetView();
     this.minimap = new Minimap(ui, this.tiles, {
       getPlayer: () => ({ x: this.renderState.x, z: this.renderState.z, heading: this.renderState.heading }),
@@ -386,10 +434,21 @@ export class App {
 
   /** Compile every material already in the scene so the first balloon, boat or flock does not stall a frame. */
   private warmShaders(): void {
-    try { this.renderer.compile(this.scene, this.camera); } catch (err) { console.warn('[skybound] shader warm-up skipped', err); }
+    const onDemand: THREE.Object3D[] = [this.motes.points, this.shafts.mesh, ...this.splash.group.children];
+    const was = onDemand.map((o) => o.visible);
+    for (const o of onDemand) o.visible = true;
+    try {
+      this.renderer.compile(this.scene, this.camera);
+      // compile() only queues the links (KHR_parallel_shader_compile); the link result is read on a
+      // program's first use, which would block that frame. Read it now, while the start screen is up.
+      for (const program of this.renderer.info.programs ?? []) program.getUniforms();
+    } catch (err) { console.warn('[skybound] shader warm-up skipped', err); }
+    onDemand.forEach((o, i) => { o.visible = was[i]; });
   }
 
   private beginFlight(): void {
+    // A quick Start click can beat the start-screen warm-up; compile now rather than mid-flight.
+    if (!this.shadersWarm) { this.shadersWarm = true; this.warmShaders(); }
     this.audio.setMix(this.settings);
     this.audio.setVolume(this.settings.volume);
     this.audio.setMuted(this.settings.muted);
@@ -452,12 +511,12 @@ export class App {
 
     this.handleActions();
 
-    if (this.phase === 'flying' && !this.worldMap.isOpen) {
+    if ((this.phase === 'flying' || this.phase === 'photo') && !this.worldMap.isOpen) {
       const cam = this.input.takeCamera();
       if (!this.frozen) this.clock.run(dt, () => copyFlightState(this.flight.state, this.prevState), () => this.simStep());
       // Render the last pair even on a zero-step frame (e.g. 144 Hz display).
       this.interpolate(this.frozen ? 1 : this.clock.alpha);
-      this.day.advance(dt);
+      if (this.phase !== 'photo') this.day.advance(dt);
       this.cameraRig.update(dt, this.renderState, cam);
       this.bird.update(dt, {
         flap: this.flight.state.flapping ? 1 : this.flight.state.boosting ? 0.6 : 0,
@@ -468,6 +527,7 @@ export class App {
         brake: this.frameInput.brake,
       });
       this.audio.update(dt, this.flight.state.speed, this.flight.state.flapping, this.flight.state.boosting, (this.flight.state.boosting ? 1.35 : 1) * BIRD_SPECIES[this.settings.birdSpecies].beat, {
+        exposure: this.waterExposureAt(this.flight.state.x, this.flight.state.z), wet: this.flight.state.wet,
         aboveGround: this.flight.state.y - this.chunks.surfaceAt(this.flight.state.x, this.flight.state.z),
         water: this.chunks.heightAt(this.flight.state.x, this.flight.state.z) < SEA_LEVEL,
         daylight: Math.max(0, Math.sin((this.day.time - 0.25) * Math.PI * 2)),
@@ -544,10 +604,27 @@ export class App {
     const s = this.flight.state;
     const r = this.renderState;
     const fwdX = Math.sin(s.heading), fwdZ = -Math.cos(s.heading);
-    this.chunks.update(s.x, s.z, fwdX, fwdZ, this.wallTime);
+    // Look ahead along the flight path so chunks in front load before they are needed
+    // (about 2.5 s of travel, capped at half a chunk).
+    const lookahead = this.diag.lookahead ? Math.min(260, s.speed * 2.5) : 0;
+    this.chunks.time = this.wallTime;
+    this.chunks.update(s.x + fwdX * lookahead, s.z + fwdZ * lookahead, fwdX, fwdZ, this.wallTime);
     this.landmarks.update(s.x, s.z, this.wallTime, this.quality.shadows);
-    this.veg.update(this.simTime, 0.83, 0.56);
+    this.veg.update(this.simTime, 0.83, 0.56, this.wallTime);
     this.wildlife.update(this.simTime, r.x, r.y, r.z, this.origin.value.x, this.origin.value.z, this.settings.wildlife, this.settings.quality);
+    this.splash.update(this.simTime, this.origin.value.x, this.origin.value.z, window.innerHeight);
+    // Dust motes in the nearest thermals, strongest at midday.
+    {
+      const near = this.airflow.thermalsNear(s.x, s.z, 650, this.thermalScratch);
+      near.sort((a, b) => Math.hypot(a.x - s.x, a.z - s.z) - Math.hypot(b.x - s.x, b.z - s.z));
+      const strength = Airflow.daylightFactor(this.day.time);
+      this.motes.update(this.simTime, window.innerHeight, near.slice(0, 3).map(t => ({ x: t.x - this.origin.value.x, z: t.z - this.origin.value.z, base: t.base, radius: t.radius, top: t.top, strength })));
+    }
+    if (s.onWater && this.phase === 'flying') {
+      const dirX = Math.sin(s.heading), dirZ = -Math.cos(s.heading);
+      this.splash.skim(s.x, s.z, dirX, dirZ, s.speed, Math.min(1, s.speed / 45));
+      if (this.simTime - this.lastSkimRing > 0.22) { this.lastSkimRing = this.simTime; this.splash.ring(s.x, s.z, 0.8 + s.speed / 60); }
+    }
 
     // Bird transform (render space).
     const bx = r.x - this.origin.value.x, bz = r.z - this.origin.value.z;
@@ -584,6 +661,28 @@ export class App {
     } else if (this.skyMoodState.haze !== 0) {
       this.fog.far = this.quality.fogFar; this.fog.near = this.fog.far * 0.22; this.clouds.setCoverage(1);
       this.skyMoodState.haze = 0; this.skyMoodState.cloudiness = 0;
+    }
+    // The mist valley: banks thin out over the day, sun shafts appear when a low sun lies along
+    // the valley, and inside it the air itself is hazier.
+    if (!this.valleyReady) { this.valleyReady = true; this.setupValley(); }
+    {
+      const mist = this.mistAmount();
+      for (let i = 0; i < 10; i++) this.clouds.setStaticOpacity(`mist-${i}`, this.diag.mist ? mist : 0);
+      const vm = this.gen.valleyAt(s.x, s.z, this.valleyScratch).mask;
+      const sunLow = THREE.MathUtils.smoothstep(this.day.sunDir.y, 0.02, 0.12) * (1 - THREE.MathUtils.smoothstep(this.day.sunDir.y, 0.3, 0.5));
+      const along = Math.abs(this.day.sunDir.x * this.valleyAxis.x + this.day.sunDir.z * this.valleyAxis.y) / Math.max(1e-3, Math.hypot(this.day.sunDir.x, this.day.sunDir.z));
+      const shaftStrength = sunLow * Math.pow(along, 2) * (0.35 + 0.65 * mist) * (this.quality.clouds ? 1 : 0);
+      this.shafts.update(this.simTime, this.day.sunDir, this.camera.position, this.origin.value.x, this.origin.value.z, shaftStrength * 0.9);
+      if (vm > 0.001) {
+        const haze = vm * mist;
+        this.fog.far *= THREE.MathUtils.lerp(1, 0.6, haze);
+        this.fog.near = this.fog.far * 0.22;
+        _hazeTint.set(0.96, 0.9, 0.82).multiplyScalar(THREE.MathUtils.lerp(0.85, 1.05, pal.daylight));
+        pal.fog.lerp(_hazeTint, haze * 0.4 * pal.daylight);
+        pal.horizon.lerp(_hazeTint, haze * 0.3 * pal.daylight);
+        pal.sunIntensity *= 1 - 0.15 * haze;
+      }
+      this.skyMoodState.valley = vm;
     }
     this.fog.color.copy(pal.fog);
     this.renderer.setClearColor(pal.fog);
@@ -644,6 +743,8 @@ export class App {
   }
 
   private updateUI(dt: number): void {
+    this.hud.setLift(this.phase === 'flying' ? this.flight.state.lift : 0);
+    this.audio.setLift(this.phase === 'flying' ? Math.min(1, this.flight.state.lift / 4) : 0);
     void dt;
     if (this.phase === 'flying' || this.phase === 'paused') {
       const s = this.renderState;
@@ -744,6 +845,42 @@ export class App {
     this.saveDirty = true;
   }
 
+  /** Mist banks and sun-shaft anchors along the valley floor, from the generator's axis. */
+  private setupValley(): void {
+    const path = this.gen.valleyPath(9);
+    const a = path[0], b = path[path.length - 1];
+    this.valleyAxis.set(b.x - a.x, b.z - a.z).normalize();
+    const rng = new Rng(hash2(3, 9, this.seed ^ 0x7a11));
+    const anchors = [];
+    for (let i = 0; i < path.length; i++) {
+      const p = path[i];
+      if (p.t < 0.05 || p.t > 0.92) continue;
+      const floor = Math.max(this.gen.heightAt(p.x, p.z), SEA_LEVEL);
+      const puffs = [];
+      for (let k = 0; k < 18; k++) {
+        const across = (rng.next() - 0.5) * 2 * 300, along = (rng.next() - 0.5) * 2 * 150;
+        puffs.push({ ox: -this.valleyAxis.y * across + this.valleyAxis.x * along, oy: 6 + rng.next() * 26, oz: this.valleyAxis.x * across + this.valleyAxis.y * along, size: 110 + rng.next() * 90 });
+      }
+      this.clouds.addStaticMass(`mist-${i}`, p.x, floor + 10, p.z, puffs, this.seed + i);
+      if (i % 2 === 0) anchors.push({ x: p.x + (rng.next() - 0.5) * 200, y: floor + 40, z: p.z + (rng.next() - 0.5) * 200, length: 380 + rng.next() * 160, width: 50 + rng.next() * 70, seed: rng.next() });
+    }
+    this.shafts.setAnchors(anchors);
+  }
+
+  /** Mist is thickest at dawn, burns off by midday and gathers again toward dusk. */
+  private mistAmount(): number {
+    const t = this.day.time;
+    const dawn = Math.exp(-Math.pow((t - 0.29) / 0.05, 2)), dusk = Math.exp(-Math.pow((t - 0.76) / 0.06, 2));
+    return THREE.MathUtils.clamp(0.18 + 0.72 * Math.max(dawn, dusk) + 0.2 * (1 - this.day.compute().daylight), 0, 1);
+  }
+
+  /** 0 sheltered lake .. 1 open sea at a point (the same measure the water shader uses for surf). */
+  private waterExposureAt(x: number, z: number): number {
+    const land = this.gen.sample(x, z, this.exposureSample).land;
+    return Math.max(0, Math.min(1, (0.75 - land) * 2.5));
+  }
+  private exposureSample = createTerrainSample();
+
   private onImpact(speed: number, kind: 'terrain' | 'water' | 'obstacle'): void {
     const strength = Math.min(1, speed / 60);
     this.cameraRig.addShake(0.3 + strength * 0.6);
@@ -787,6 +924,7 @@ export class App {
     for (const a of this.input.takeActions()) {
       switch (a) {
         case 'escape':
+          if (this.phase === 'photo') { this.exitPhoto(); break; }
           if (this.worldMap.isOpen) this.closeMap();
           else if (this.settingsPanel.visible) this.closeSettings();
           else if (this.phase === 'flying') this.pause();
@@ -813,6 +951,12 @@ export class App {
         case 'togglePause':
           this.togglePause();
           break;
+        case 'photo':
+          if (this.phase === 'photo') this.exitPhoto(); else if (this.phase === 'flying' && !this.worldMap.isOpen) this.enterPhoto();
+          break;
+        case 'confirm':
+          if (this.phase === 'photo') this.capturePhoto();
+          break;
         case 'toggleDev':
           this.settings.showDevOverlay = !this.settings.showDevOverlay;
           this.dev.setVisible(this.settings.showDevOverlay);
@@ -820,6 +964,47 @@ export class App {
           break;
       }
     }
+  }
+
+  private enterPhoto(): void {
+    if (this.phase !== 'flying') return;
+    this.phase = 'photo';
+    this.frozen = true;
+    this.input.clear();
+    this.hud.setVisible(false);
+    this.minimap.setVisible(false);
+    this.touch?.setVisible(false);
+    this.cameraRig.fovOverride = this.camera.fov;
+    this.photoPanel.show(this.camera.fov, this.day.time, this.photoHideBird);
+    this.bird.group.visible = !this.photoHideBird;
+  }
+
+  private exitPhoto(): void {
+    if (this.phase !== 'photo') return;
+    this.phase = 'flying';
+    this.frozen = false;
+    this.clock.reset();
+    this.lastFrame = performance.now();
+    this.cameraRig.fovOverride = null;
+    this.photoPanel.hide();
+    this.bird.group.visible = true;
+    this.hud.setVisible(true);
+    this.minimap.setVisible(true);
+    this.touch?.setVisible(true);
+  }
+
+  /** Render the current view and hand the PNG to the browser as a download. */
+  private capturePhoto(): void {
+    this.renderer.render(this.scene, this.camera);
+    const url = this.renderer.domElement.toDataURL('image/png');
+    this.lastPhotoBytes = url.length;
+    const a = document.createElement('a');
+    const t = new Date();
+    a.href = url;
+    a.download = `skybound-${this.seed}-${t.getFullYear()}${String(t.getMonth() + 1).padStart(2, '0')}${String(t.getDate()).padStart(2, '0')}-${String(t.getHours()).padStart(2, '0')}${String(t.getMinutes()).padStart(2, '0')}${String(t.getSeconds()).padStart(2, '0')}.png`;
+    document.body.appendChild(a); a.click(); a.remove();
+    this.photoPanel.flash();
+    this.audio.chime('ui');
   }
 
   private togglePause(): void {
@@ -893,7 +1078,9 @@ export class App {
   }
 
   private portraitsReady = false;
-  private skyMoodState = { haze: 0, cloudiness: 0 };
+  private appliedUniform = false;
+  private profileFor(s: Settings) { return s.uniformHandling ? DEFAULT_PROFILE : BIRD_SPECIES[s.birdSpecies].profile; }
+  private skyMoodState = { haze: 0, cloudiness: 0, valley: 0 };
 
   private openSettings(): void {
     if (this.settingsPanel.visible) return;
@@ -952,8 +1139,9 @@ export class App {
       if (!this.audio.started) this.audio.start();
       else if (this.settingsPanel.visible && this.audio.wasSuspendedByUs) void this.audio.resume();
     }
+    if (s.uniformHandling !== this.appliedUniform) { this.appliedUniform = s.uniformHandling; this.flight.setProfile(this.profileFor(s)); }
     if (s.birdSpecies !== prevSpecies) {
-      this.flight.setProfile(BIRD_SPECIES[s.birdSpecies].profile);
+      this.flight.setProfile(this.profileFor(s));
       const next = new BirdModel(s.birdSpecies);
       next.group.position.copy(this.bird.group.position);
       next.group.quaternion.copy(this.bird.group.quaternion);
@@ -1095,6 +1283,11 @@ export class App {
       cameraState: () => this.cameraRig.state(),
       orbit: (az: number, el: number, dist?: number) => this.cameraRig.setOrbit(az, el, dist),
       setClouds: (v: boolean) => { this.clouds.visible = v; },
+      setShafts: (v: boolean) => { this.shafts.mesh.visible = v; },
+      setMist: (v: boolean) => { this.diag.mist = v; },
+      setMotes: (v: boolean) => { this.motes.enabled = v; },
+      setLookahead: (v: boolean) => { this.diag.lookahead = v; },
+
       terrainDetail: (v: number) => { this.chunks.setDetail(v); },
       vegPlain: (on: boolean) => {
         // Diagnostic: render trees with the stock Lambert shader.
@@ -1112,6 +1305,9 @@ export class App {
       wildlife: () => this.wildlife.counts(),
       settingsVisible: () => this.settingsPanel.visible,
       musicStyle: () => this.audio.currentMusicStyle,
+      lift: () => this.flight.state.lift,
+      photo: () => ({ active: this.phase === 'photo', lastPhotoBytes: this.lastPhotoBytes, fov: this.camera.fov, birdVisible: this.bird.group.visible }),
+      thermalsNear: (r = 1500) => this.airflow.thermalsNear(this.flight.state.x, this.flight.state.z, r, []),
       skyMood: () => ({ ...this.skyMoodState, fogFar: this.fog.far }),
     };
   }
@@ -1133,6 +1329,9 @@ export class App {
     this.clouds.dispose();
     this.bird.dispose();
     this.wildlife.dispose();
+    this.splash.dispose();
+    this.shafts.dispose();
+    this.motes.dispose();
     this.audio.dispose();
     this.renderer.dispose();
   }

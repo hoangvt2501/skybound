@@ -59,6 +59,12 @@ export interface FlightState {
   time: number;
   /** Set on the step an impact happened (for effects), cleared next step. */
   impacted: boolean;
+  /** 1 while touching water, then decays (dripping); 0 when dry. */
+  wet: number;
+  /** Vertical air speed at the bird (m/s): thermals and ridge lift. */
+  lift: number;
+  /** True on steps where the bird is in contact with the water surface. */
+  onWater: boolean;
   /** Distance travelled (m). */
   odometer: number;
 }
@@ -69,7 +75,7 @@ export function createFlightState(): FlightState {
     heading: 0, pitch: 0, roll: 0,
     speed: FLIGHT.cruiseSpeed, vy: 0,
     boost: FLIGHT.boostCapacity, boostCooldown: 0, impactCooldown: 0,
-    turnSmooth: 0, pitchSmooth: 0, flapping: false, boosting: false, time: 0, impacted: false, odometer: 0,
+    turnSmooth: 0, pitchSmooth: 0, flapping: false, boosting: false, time: 0, impacted: false, odometer: 0, wet: 0, onWater: false, lift: 0,
   };
 }
 
@@ -97,6 +103,8 @@ export interface FlightProfile {
   glide: number;
 }
 export const DEFAULT_PROFILE: FlightProfile = { speed: 1, agility: 1, flapPower: 1, glide: 1 };
+/** Height above the surface at which the belly touches the water (m). */
+const WATER_CONTACT = 0.35;
 
 export type FlightConstants = { -readonly [K in keyof typeof FLIGHT]: number };
 
@@ -121,8 +129,13 @@ export class FlightController {
   readonly state: FlightState;
   private terrain: TerrainQuery;
   private tuned = tuneFlight(DEFAULT_PROFILE);
+  private wasOnWater = false;
   /** Called on terrain/obstacle impact with the impact speed. */
   onImpact: ((speed: number, kind: 'terrain' | 'water' | 'obstacle') => void) | null = null;
+  /** Vertical air speed (m/s) at a point; the bird is carried by it. */
+  airflow: ((x: number, y: number, z: number) => number) | null = null;
+  /** Water contact: 'enter' once per touchdown (steepness 0..1 = how vertical the entry was), 'exit' when airborne again. */
+  onWater: ((event: 'enter' | 'exit', speed: number, steepness: number) => void) | null = null;
 
   constructor(terrain: TerrainQuery, state = createFlightState()) {
     this.terrain = terrain;
@@ -193,6 +206,7 @@ export class FlightController {
     else accel -= (s.speed - F.cruiseSpeed) * F.drag;
     if (input.flap) accel += F.flapAccel;
     if (boosting) accel += F.boostAccel;
+    if (s.onWater) accel -= s.speed * 0.35; // water drag while skimming
     accel -= input.brake * 22;
     s.speed += accel * dt;
     s.speed = clamp(s.speed, F.minSpeed * 0.6, maxSpeed);
@@ -208,8 +222,15 @@ export class FlightController {
     const vz = dir.z * cp * s.speed;
     const vy = sp * s.speed + s.vy;
     const x0 = s.x, y0 = s.y, z0 = s.z;
-    const x1 = x0 + vx * dt, y1 = y0 + vy * dt, z1 = z0 + vz * dt;
+    // Rising air (thermals, ridge lift) carries the bird with it.
+    s.lift = this.airflow ? this.airflow(x0, y0, z0) : 0;
+    const x1 = x0 + vx * dt, y1 = y0 + (vy + s.lift) * dt, z1 = z0 + vz * dt;
+    this.wasOnWater = s.onWater;
+    s.onWater = false;
     this.sweep(x0, y0, z0, x1, y1, z1);
+    if (this.wasOnWater && !s.onWater) this.onWater?.('exit', s.speed, 0);
+    this.wasOnWater = s.onWater;
+    if (!s.onWater && s.wet > 0) s.wet = Math.max(0, s.wet - dt * 0.35);
     s.odometer += Math.hypot(s.x - x0, s.y - y0, s.z - z0);
 
     if (s.impactCooldown > 0) s.impactCooldown -= dt;
@@ -232,11 +253,13 @@ export class FlightController {
       const ny = y0 + (y1 - y0) * t;
       const nz = z0 + (z1 - z0) * t;
       const ground = this.terrain.heightAt(nx, nz);
-      const floor = Math.max(ground, SEA_LEVEL) + F.groundClearance;
-      if (ny < floor) {
-        // Resolve against the terrain: place on the floor and bounce gently.
-        const kind = ground < SEA_LEVEL ? 'water' : 'terrain';
-        this.resolveImpact(nx, floor, nz, kind);
+      if (ground < SEA_LEVEL - 0.4) {
+        // Over water the surface is not a wall: below belly height the step continues under the
+        // surface (down to the dip limit), drag slows the bird and buoyancy lifts it back out.
+        if (ny < SEA_LEVEL + WATER_CONTACT) { this.touchWater(x1, y1, z1, ground); return; }
+      } else if (ny < Math.max(ground, SEA_LEVEL) + F.groundClearance) {
+        // Resolve against the terrain (or the shallow shoreline): place on the floor and bounce gently.
+        this.resolveImpact(nx, Math.max(ground, SEA_LEVEL) + F.groundClearance, nz, ground < SEA_LEVEL ? 'water' : 'terrain');
         return;
       }
       // Obstacles (trees, structures): cylinders.
@@ -268,6 +291,34 @@ export class FlightController {
       px = nx; py = ny; pz = nz;
     }
     s.x = px; s.y = py; s.z = pz;
+  }
+
+  /**
+   * Water contact. A shallow entry skims: the bird rides just under the
+   * surface, sheds speed to drag and spray, and climbs out on its own. A steep
+   * entry plunges deeper, loses more speed and pops back up under buoyancy.
+   * Both keep the bird above the seabed.
+   */
+  private touchWater(x: number, y: number, z: number, ground: number): void {
+    const s = this.state;
+    const F = FLIGHT;
+    const steep = clamp(-Math.sin(s.pitch) + Math.max(0, -s.vy) / 40, 0, 1);
+    if (!this.wasOnWater) { // first contact of this touchdown (the flag is cleared before every sweep)
+      const entrySpeed = s.speed;
+      // Belly-flop costs more than a skim; either way it is far gentler than terrain.
+      s.speed = Math.max(F.minSpeed * 0.7, s.speed * (1 - 0.55 * steep));
+      s.impacted = true;
+      this.onWater?.('enter', entrySpeed, steep);
+    }
+    const maxDip = 0.35 + 1.6 * steep;
+    s.x = x; s.z = z;
+    s.y = Math.max(y, SEA_LEVEL - maxDip, ground + F.groundClearance);
+    s.onWater = true; s.wet = 1;
+    // Nose comes up and the roll levels while in the water.
+    s.pitch = Math.max(s.pitch, Math.min(0.18, s.pitch + 0.012));
+    s.roll *= 0.85;
+    // Buoyancy: a spring toward slightly above the surface, capped so it reads as a lift, not a launch.
+    s.vy = Math.max(s.vy, Math.min(4.5, (SEA_LEVEL + 0.5 - s.y) * 3.5 + 1.5));
   }
 
   private resolveImpact(x: number, y: number, z: number, kind: 'terrain' | 'water' | 'obstacle'): void {

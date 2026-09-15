@@ -29,6 +29,9 @@ interface CloudMass {
   z: number;
   puffs: Puff[];
   seed: number;
+  /** Static masses (mist banks) do not drift with the wind and carry their own opacity. */
+  static?: boolean;
+  opacity?: number;
 }
 
 const CELL = 2000;
@@ -185,6 +188,8 @@ export class Clouds {
   private cirrus: CirrusLayer;
   private cirrusTex: THREE.Texture;
   private masses = new Map<string, CloudMass>();
+  private staticMasses = new Map<string, CloudMass>();
+  private aAlpha: THREE.InstancedBufferAttribute;
   private lastCell = { x: NaN, z: NaN };
   private maxPuffs: number;
   private coverage = 1;
@@ -209,6 +214,8 @@ export class Clouds {
       ]),
       vertexShader: /* glsl */ `
         attribute float aLight;
+        attribute float aAlpha;
+        varying float vAlpha;
         attribute float aVariant;
         uniform float uSprites;
         varying vec2 vUv;
@@ -226,6 +233,7 @@ export class Clouds {
           vec3 wp = center + (right * p.x + up * p.y) * size;
           vUv = vec2((uv.x + floor(aVariant)) / uSprites, uv.y);
           vLight = aLight;
+          vAlpha = aAlpha;
           vec4 mvPosition = viewMatrix * vec4(wp, 1.0);
           vNear = -mvPosition.z;
           gl_Position = projectionMatrix * mvPosition;
@@ -240,6 +248,7 @@ export class Clouds {
         varying vec2 vUv;
         varying float vLight;
         varying float vNear;
+        varying float vAlpha;
         #include <fog_pars_fragment>
         void main() {
           float a = texture2D(uMap, vUv).a;
@@ -247,7 +256,7 @@ export class Clouds {
           a *= smoothstep(25.0, 140.0, vNear);
           if (a < 0.02) discard;
           vec3 col = mix(uShade, uLit, vLight);
-          gl_FragColor = vec4(col, a * 0.92 * mix(0.45, 1.0, uCover));
+          gl_FragColor = vec4(col, a * 0.92 * mix(0.45, 1.0, uCover) * vAlpha);
           #include <fog_fragment>
         }
       `,
@@ -261,6 +270,9 @@ export class Clouds {
     this.puffMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.aLight = new THREE.InstancedBufferAttribute(new Float32Array(maxPuffs), 1);
     this.aVariant = new THREE.InstancedBufferAttribute(new Float32Array(maxPuffs), 1);
+    this.aAlpha = new THREE.InstancedBufferAttribute(new Float32Array(maxPuffs).fill(1), 1);
+    this.aAlpha.setUsage(THREE.DynamicDrawUsage);
+    quad.setAttribute('aAlpha', this.aAlpha);
     this.aLight.setUsage(THREE.DynamicDrawUsage);
     this.aVariant.setUsage(THREE.DynamicDrawUsage);
     quad.setAttribute('aLight', this.aLight);
@@ -322,6 +334,17 @@ export class Clouds {
   }
 
   /** 0..1.2: thin, sparse cover to heavy overcast. Affects puff opacity and flattens the lit/shade contrast. */
+  /** Add or replace a static mist bank (global coords; puffs relative to the center). */
+  addStaticMass(key: string, x: number, y: number, z: number, puffs: { ox: number; oy: number; oz: number; size: number }[], seed = 0): void {
+    const rng = new Rng(seed ^ 0x51a7);
+    this.staticMasses.set(key, { key, x, y, z, seed, static: true, opacity: 1, puffs: puffs.map(p => ({ ...p, light: 0.7, variant: rng.int(SPRITES) + rng.next() * 0.999, rot: rng.next() })) });
+    this.lastUpload = -Infinity;
+  }
+  setStaticOpacity(key: string, opacity: number): void {
+    const mass = this.staticMasses.get(key);
+    if (mass && Math.abs((mass.opacity ?? 1) - opacity) > 0.02) { mass.opacity = opacity; this.lastUpload = -Infinity; }
+  }
+
   setCoverage(c: number): void {
     this.coverage = THREE.MathUtils.clamp(c, 0, 1.2);
     this.puffMaterial.uniforms.uCover.value = this.coverage;
@@ -359,6 +382,20 @@ export class Clouds {
     const ccx = Math.floor((camGX - driftX) / CELL), ccz = Math.floor((camGZ - driftZ) / CELL);
     this.order.length = 0;
     const maxDist = CELL * (RADIUS_CELLS + 0.5);
+    // Static masses: no drift, their own opacity (mist banks that thin out over the day).
+    for (const mass of this.staticMasses.values()) {
+      const opacity = mass.opacity ?? 1;
+      if (opacity < 0.01) continue;
+      const md = Math.hypot(mass.x - camGX, mass.z - camGZ);
+      if (md > maxDist) continue;
+      for (const p of mass.puffs) {
+        const gx = mass.x + p.ox, gy = mass.y + p.oy, gz = mass.z + p.oz;
+        const rx = gx - originX, rz = gz - originZ;
+        const d = Math.hypot(rx - cameraRender.x, gy - cameraRender.y, rz - cameraRender.z);
+        p.light = THREE.MathUtils.clamp(0.78 + 0.2 * (p.oy / 40) + 0.1 * sunDir.y, 0, 1); // mist stays pale, lit from above
+        this.order.push({ d, mass, puff: p, x: rx, y: gy, z: rz });
+      }
+    }
     for (let dz = -RADIUS_CELLS; dz <= RADIUS_CELLS; dz++) {
       for (let dx = -RADIUS_CELLS; dx <= RADIUS_CELLS; dx++) {
         const mass = this.massFor(ccx + dx, ccz + dz);
@@ -389,12 +426,14 @@ export class Clouds {
       this.puffMesh.setMatrixAt(i, m);
       this.aLight.setX(i, e.puff.light);
       this.aVariant.setX(i, e.puff.variant);
+      this.aAlpha.setX(i, e.mass.static ? (e.mass.opacity ?? 1) * 0.6 : 1);
       i++;
     }
     this.puffMesh.count = i;
     this.puffMesh.instanceMatrix.needsUpdate = true;
     this.aLight.needsUpdate = true;
     this.aVariant.needsUpdate = true;
+    this.aAlpha.needsUpdate = true;
     void this.lastCell;
   }
 

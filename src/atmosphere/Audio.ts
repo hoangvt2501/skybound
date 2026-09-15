@@ -2,7 +2,7 @@
 import { MusicBox, type MusicStyle } from './Music';
 
 export interface SoundMix { ambienceVolume: number; musicVolume: number; effectsVolume: number }
-export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number }
+export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number; /** 0 sheltered lake .. 1 open sea, for surf loudness */ exposure?: number; /** 0..1 while touching or dripping */ wet?: number }
 const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
 /** Total wind level for a speed; the two layers below split it by timbre. */
@@ -24,6 +24,13 @@ export class AudioSystem {
   private rushGain: GainNode | null = null;
   private flapGain: GainNode | null = null;
   private waterGain: GainNode | null = null;
+  private waterFilter: BiquadFilterNode | null = null;
+  private skimGain: GainNode | null = null;
+  private varioOsc: OscillatorNode | null = null;
+  private varioGain: GainNode | null = null;
+  private varioLfo: OscillatorNode | null = null;
+  private varioLfoGain: GainNode | null = null;
+  private liftLevel = 0;
   private sources: AudioScheduledSourceNode[] = [];
   private musicBox: MusicBox | null = null;
   private musicStyle: MusicStyle = 'sunny';
@@ -76,10 +83,24 @@ export class AudioSystem {
       flapFilter.type = 'bandpass'; flapFilter.frequency.value = 160; flapFilter.Q.value = 0.65;
       this.flapGain = ctx.createGain(); this.flapGain.gain.value = 0;
       this.loopNoise(buffer).connect(flapFilter).connect(this.flapGain).connect(this.effects);
-      const waterFilter = ctx.createBiquadFilter();
-      waterFilter.type = 'lowpass'; waterFilter.frequency.value = 950; waterFilter.Q.value = 0.4;
+      this.waterFilter = ctx.createBiquadFilter();
+      this.waterFilter.type = 'lowpass'; this.waterFilter.frequency.value = 950; this.waterFilter.Q.value = 0.4;
       this.waterGain = ctx.createGain(); this.waterGain.gain.value = 0;
-      this.loopNoise(buffer).connect(waterFilter).connect(this.waterGain).connect(this.ambience);
+      this.loopNoise(buffer).connect(this.waterFilter).connect(this.waterGain).connect(this.ambience);
+      // Skimming hiss: bright noise that only opens while the bird touches the water.
+      const skimFilter = ctx.createBiquadFilter();
+      skimFilter.type = 'bandpass'; skimFilter.frequency.value = 2600; skimFilter.Q.value = 0.7;
+      this.skimGain = ctx.createGain(); this.skimGain.gain.value = 0;
+      this.loopNoise(buffer).connect(skimFilter).connect(this.skimGain).connect(this.effects);
+      // Variometer: a quiet pulsing sine whose pitch and pulse rate rise with the lift.
+      this.varioOsc = ctx.createOscillator(); this.varioOsc.type = 'sine'; this.varioOsc.frequency.value = 520;
+      this.varioGain = ctx.createGain(); this.varioGain.gain.value = 0;
+      this.varioLfo = ctx.createOscillator(); this.varioLfo.type = 'sine'; this.varioLfo.frequency.value = 2;
+      this.varioLfoGain = ctx.createGain(); this.varioLfoGain.gain.value = 0;
+      this.varioLfo.connect(this.varioLfoGain).connect(this.varioGain.gain);
+      const varioPan = ctx.createStereoPanner(); varioPan.pan.value = -0.15;
+      this.varioOsc.connect(this.varioGain).connect(varioPan).connect(this.effects);
+      this.varioOsc.start(); this.varioLfo.start(); this.sources.push(this.varioOsc, this.varioLfo);
       this.musicBox = new MusicBox(ctx, this.music);
       this.musicBox.setStyle(this.musicStyle);
       this.started = true;
@@ -119,6 +140,9 @@ export class AudioSystem {
     this.effects?.gain.setTargetAtTime(this.mix.effectsVolume, t, 0.2);
   }
 
+  /** 0..1 lift level for the variometer; 0 silences it. */
+  setLift(level: number): void { this.liftLevel = clamp(level); }
+
   setMusicStyle(style: MusicStyle): void {
     this.musicStyle = style;
     this.musicBox?.setStyle(style);
@@ -153,7 +177,18 @@ export class AudioSystem {
     this.airFilter.frequency.setTargetAtTime(700 + amount * 900 + (boosting ? 250 : 0), t, 0.8);
     this.rushGain.gain.setTargetAtTime(total * (0.15 + 0.85 * amount * amount) * (boosting ? 1.4 : 0.9), t, 0.7);
     const near = 1 - clamp(environment.aboveGround / 200);
-    this.waterGain?.gain.setTargetAtTime(environment.water ? near * (0.06 + Math.sin(t * 0.35) * 0.012) : 0, t, 2);
+    // Surf swells with exposure: open sea is louder and brighter than a sheltered lake.
+    const exposure = clamp(environment.exposure ?? 0);
+    this.waterGain?.gain.setTargetAtTime(environment.water ? near * (0.06 + 0.07 * exposure + Math.sin(t * 0.35) * (0.012 + 0.02 * exposure)) : 0, t, 2);
+    this.waterFilter?.frequency.setTargetAtTime(950 + 900 * exposure, t, 2);
+    this.skimGain?.gain.setTargetAtTime(0.09 * clamp(environment.wet ?? 0) * clamp(speed / 30), t, 0.08);
+    if (this.varioGain && this.varioOsc && this.varioLfo && this.varioLfoGain) {
+      const lv = this.liftLevel < 0.12 ? 0 : this.liftLevel;
+      this.varioGain.gain.setTargetAtTime(0.022 * lv, t, 0.15);
+      this.varioLfoGain.gain.setTargetAtTime(0.02 * lv, t, 0.15);
+      this.varioOsc.frequency.setTargetAtTime(520 + 380 * lv, t, 0.2);
+      this.varioLfo.frequency.setTargetAtTime(1.6 + 3.2 * lv, t, 0.2);
+    }
     if (t >= this.nextBird) {
       this.nextBird = t + 9 + Math.random() * 12;
       if (near > 0.12 && environment.daylight > 0.25 && !environment.water && !this.muted && this.mix.ambienceVolume > 0) {
@@ -182,6 +217,21 @@ export class AudioSystem {
     this.lastChime = t;
     const notes = kind === 'discover' ? [587.33, 739.99, 880] : kind === 'waypoint' ? [440, 587.33] : [440];
     notes.forEach((f, i) => this.tone(f, f, 0.055, 0.8, t + i * 0.16, this.effects!));
+  }
+
+  /** Water entry: a noise burst that darkens as it decays, a low plop and a short 'shhh' tail scaled by strength. */
+  splash(strength = 1): void {
+    if (!this.ctx || !this.effects || this.ctx.state !== 'running' || this.suspendedByUs || this.muted) return;
+    const ctx = this.ctx, t = ctx.currentTime, k = clamp(strength);
+    const noise = ctx.createBufferSource(); noise.buffer = this.makeNoise(ctx, 0.5);
+    const filter = ctx.createBiquadFilter(); filter.type = 'bandpass'; filter.Q.value = 0.6;
+    filter.frequency.setValueAtTime(2200 + 1800 * k, t); filter.frequency.exponentialRampToValueAtTime(500, t + 0.35 + 0.3 * k);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, t); gain.gain.linearRampToValueAtTime(0.22 + 0.3 * k, t + 0.02); gain.gain.exponentialRampToValueAtTime(0.0005, t + 0.45 + 0.5 * k);
+    noise.connect(filter).connect(gain).connect(this.effects);
+    noise.start(t); noise.stop(t + 1.1);
+    noise.onended = () => { noise.disconnect(); filter.disconnect(); gain.disconnect(); };
+    this.tone(160, 55, 0.05 + 0.08 * k, 0.3 + 0.2 * k, t, this.effects); // the plop
   }
 
   thump(strength = 1): void {

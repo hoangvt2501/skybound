@@ -45,6 +45,7 @@ export class SettingsPanel {
                 <span class="bird-traits">${(['speed', 'agility', 'glide', 'power'] as const).map(k => `<span><i>${k[0].toUpperCase() + k.slice(1)}</i><b aria-label="${b.traits[k]} of 5">${'●'.repeat(b.traits[k])}${'○'.repeat(5 - b.traits[k])}</b></span>`).join('')}</span>
               </button>`).join('')}</div>
             <p class="muted small bird-description" aria-live="polite"></p>
+            <label class="settings-check"><input type="checkbox" data-key="uniformHandling"> Same handling for every bird (only looks and wingbeat change)</label>
           </div><p class="muted small">Each bird has its own silhouette, wingbeat and handling; the controls stay the same.</p></fieldset>
           <fieldset><legend>Soundscape</legend><div class="settings-grid">
             ${slider('Master volume', 'volume')}

@@ -62,6 +62,22 @@ export interface MacroLayout {
   wet: { x: number; y: number; r: number };
   upland: { x: number; y: number; r: number };
   landRadius: number;
+  /** The mist valley: a glacial trough cut into the range from the wetland side, mouth -> head (region coords). */
+  valley: { mouth: [number, number]; head: [number, number] };
+}
+
+/** Valley cross-section: full floor within this distance of the axis (m)... */
+const VALLEY_FLOOR_HALF = 400;
+/** ...and mountain walls fully back by this distance (m). */
+const VALLEY_WALL_HALF = 950;
+
+export interface ValleySample {
+  /** 1 on the valley floor, 0 outside. */
+  mask: number;
+  /** Position along the axis: 0 at the mouth, 1 at the head. */
+  t: number;
+  /** Distance from the axis (m). */
+  dist: number;
 }
 
 const RH = REGION_HALF_SIZE;
@@ -173,6 +189,16 @@ export class WorldGen {
   static makeLayout(seed: number): MacroLayout {
     const rng = new Rng(hash2(11, 7, seed));
     const jit = (v: number, amt: number) => v + (rng.next() * 2 - 1) * amt;
+    const layout = WorldGen.baseLayout(rng, jit);
+    // The valley opens toward the wetland (where flights begin) and runs into the range
+    // just short of the spine core, so the opening view looks straight into it.
+    const wet = layout.wet, sp = layout.spine[1];
+    const along = (k: number): [number, number] => [wet.x + (sp[0] - wet.x) * k, wet.y + (sp[1] - wet.y) * k];
+    layout.valley = { mouth: along(0.6), head: along(0.9) };
+    return layout;
+  }
+
+  private static baseLayout(rng: Rng, jit: (v: number, amt: number) => number): MacroLayout {
     return {
       angle: rng.next() * Math.PI * 2,
       spine: [
@@ -185,6 +211,7 @@ export class WorldGen {
       wet: { x: jit(-0.5, 0.08), y: jit(0.52, 0.08), r: jit(0.42, 0.04) },
       upland: { x: jit(-0.08, 0.08), y: jit(-0.6, 0.06), r: jit(0.4, 0.04) },
       landRadius: jit(0.88, 0.04),
+      valley: { mouth: [0, 0], head: [0, 0] },
     };
   }
 
@@ -193,6 +220,29 @@ export class WorldGen {
     const u = this.cosA * ru + this.sinA * rv;
     const v = -this.sinA * ru + this.cosA * rv;
     return { x: u * RH, z: v * RH };
+  }
+
+  /** Where a point sits relative to the mist valley (mask 1 = floor). */
+  valleyAt(x: number, z: number, out: ValleySample = { mask: 0, t: 0, dist: 0 }): ValleySample {
+    const u = x / RH, v = z / RH;
+    const ru = this.cosA * u - this.sinA * v, rv = this.sinA * u + this.cosA * v;
+    const [ax, ay] = this.layout.valley.mouth, [bx, by] = this.layout.valley.head;
+    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy || 1;
+    const t = ((ru - ax) * dx + (rv - ay) * dy) / len2;
+    const tc = clamp(t, 0, 1);
+    const dist = Math.hypot(ru - (ax + dx * tc), rv - (ay + dy * tc)) * RH;
+    const across = 1 - smoothstep(VALLEY_FLOOR_HALF, VALLEY_WALL_HALF, dist);
+    const ends = smoothstep(-0.14, 0.02, t) * (1 - smoothstep(0.9, 1.06, t));
+    out.mask = across * ends; out.t = t; out.dist = dist;
+    return out;
+  }
+
+  /** World points along the valley axis (mouth -> head). */
+  valleyPath(steps = 8): { x: number; z: number; t: number }[] {
+    const [ax, ay] = this.layout.valley.mouth, [bx, by] = this.layout.valley.head;
+    const out = [];
+    for (let i = 0; i <= steps; i++) { const t = i / steps; const w = this.regionToWorld(ax + (bx - ax) * t, ay + (by - ay) * t); out.push({ x: w.x, z: w.z, t }); }
+    return out;
   }
 
   /** Full terrain sample (height, masks, climate, biome weights). */
@@ -230,6 +280,10 @@ export class WorldGen {
     let wet = 1 - smoothstep(L.wet.r * 0.5, L.wet.r, dW);
     const dU = Math.hypot(ru - L.upland.x, rv - L.upland.y) + edge;
     let upland = 1 - smoothstep(L.upland.r * 0.5, L.upland.r, dU);
+    // The mist valley cuts a temperate floor into the range: the mountain mask thins
+    // on the floor (meadow biome, lower base mass) and the carve below sets its height.
+    const valley = this.valleyAt(x, z, this.valleyScratch);
+    mount *= 1 - 0.85 * valley.mask;
     // Masks only apply inside the curated region; outside it terrain is generic.
     mount *= macroW;
     arid *= macroW;
@@ -301,6 +355,17 @@ export class WorldGen {
       const foot = smoothstep(0.02, 0.45, mount) * (1 - smoothstep(0.45, 1, mount));
       const hillN = this.nHills.fbm(x / 900 + 3, z / 900 + 3, 3) * 0.5 + 0.5;
       h += foot * (40 + 110 * hillN);
+    }
+
+    // Mist valley carve: a gently rising floor with a lake in its lower half.
+    if (valley.mask > 0.001) {
+      const vt = clamp(valley.t, 0, 1);
+      let floor = 3 + 125 * Math.pow(vt, 1.8) + 6 * hills + 2.5 * detail;
+      // A lake fills the lower third: deep enough (6-10 m) to read as water, with a noisy shore.
+      const lakeAlong = smoothstep(0.08, 0.22, vt) * (1 - smoothstep(0.42, 0.58, vt));
+      const lakeAcross = 1 - smoothstep(170, 340, valley.dist + 45 * hills);
+      floor -= 24 * lakeAlong * lakeAcross;
+      h = lerp(h, floor, smoothstep(0, 1, valley.mask));
     }
 
     // Coast: fall away to the seafloor where land-ness drops.
@@ -386,10 +451,12 @@ export class WorldGen {
   }
 
   /** Gradient magnitude (rise over run) from central differences. */
-  /** 0..1 wildflower patch field for meadow ground cover (about 90 m blobs). */
+  /** 0..1 wildflower patch field for meadow ground cover (about 90 m blobs); the valley floor blooms more. */
   flowerPatch(x: number, z: number): number {
-    return smoothstep(0.12, 0.5, this.nVeg.noise(x / 95 + 11.3, z / 95 - 7.1));
+    const v = this.valleyAt(x, z, this.valleyScratch).mask;
+    return smoothstep(0.12 - 0.1 * v, 0.5 - 0.2 * v, this.nVeg.noise(x / 95 + 11.3, z / 95 - 7.1));
   }
+  private valleyScratch: ValleySample = { mask: 0, t: 0, dist: 0 };
 
   slopeAt(x: number, z: number, d = 6): number {
     const hx = this.heightAt(x + d, z) - this.heightAt(x - d, z);

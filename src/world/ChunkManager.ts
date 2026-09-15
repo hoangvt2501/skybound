@@ -314,6 +314,12 @@ export class ChunkManager {
 
   /** Results waiting for main-thread installation (bounded per frame). */
   private installQueue: WorkerResponse[] = [];
+  /** Wall-clock time shared with the vegetation shaders (drives the dissolve; keeps running while paused). */
+  time = 0;
+  /** Freshly born meshes dissolve in with the fading material, then settle onto the plain one. */
+  private settling: { im: THREE.InstancedMesh; until: number }[] = [];
+  /** Instanced meshes of a replaced representation, kept while they dissolve out. */
+  private fading: { im: THREE.InstancedMesh; until: number }[] = [];
 
   private onResult(msg: WorkerResponse): void {
     // Defer GPU uploads to processInstalls() so a burst of results (start,
@@ -330,6 +336,20 @@ export class ChunkManager {
    * Returns the number of results installed.
    */
   processInstalls(budgetMs = 4, maxCount = 6): number {
+    while (this.fading.length > 0 && this.fading[0].until <= this.time) {
+      const { im } = this.fading.shift()!;
+      this.root.remove(im);
+      disposeInstanceGeometry(im.geometry);
+      im.dispose();
+    }
+    // A few swaps per frame: each settled mesh needs a new vertex-array binding for the plain program,
+    // and the whole opening set would otherwise settle in one frame (a 50 ms hitch on integrated GPUs).
+    for (let swaps = 0; swaps < 6 && this.settling.length > 0 && this.settling[0].until <= this.time; swaps++) {
+      const { im } = this.settling.shift()!;
+      const life = im.geometry.getAttribute('aLife') as THREE.InstancedBufferAttribute | undefined;
+      // A mesh retired before it settled keeps the dissolving material until it is disposed.
+      if (im.parent === this.root && life && life.getY(0) >= 1e9) im.material = this.veg.settledTwin(im.material as THREE.Material);
+    }
     if (this.installQueue.length === 0) return 0;
     const t0 = performance.now();
     let n = 0;
@@ -389,7 +409,7 @@ export class ChunkManager {
   }
 
   private installChunk(rec: ChunkRecord, msg: Extract<WorkerResponse, { type: 'chunk' }>): void {
-    this.removeChunkObjects(rec);
+    this.retireChunkObjects(rec);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
@@ -427,6 +447,11 @@ export class ChunkManager {
     const ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
     const n = msg.trees.length / TREE_STRIDE;
     const finish = (im: THREE.InstancedMesh) => {
+      // Birth now, death never: the shader dissolves the instances in over 0.7 s.
+      const life = new Float32Array(im.count * 2);
+      for (let i = 0; i < im.count; i++) { life[i * 2] = this.time; life[i * 2 + 1] = 1e9; }
+      im.geometry.setAttribute('aLife', new THREE.InstancedBufferAttribute(life, 2));
+      this.settling.push({ im, until: this.time + 0.8 });
       im.instanceMatrix.needsUpdate = true;
       im.computeBoundingSphere();
       im.position.set(ox, 0, oz);
@@ -452,7 +477,7 @@ export class ChunkManager {
       const meshes = new Map<number, { im: THREE.InstancedMesh; rand: Float32Array; cursor: number }>();
       for (const [k, c] of counts) {
         const s = Math.floor(k / 8), v = k % 8;
-        const im = new THREE.InstancedMesh(this.veg.geometry(s, v), this.veg.material, c);
+        const im = new THREE.InstancedMesh(this.veg.geometry(s, v), this.veg.materialFading, c);
         im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
         im.castShadow = this.shadows;
         const rand = new Float32Array(c);
@@ -481,7 +506,7 @@ export class ChunkManager {
       }
     } else if (n > 0) {
       // Impostors: crossed billboards, one tile per species.
-      const im = new THREE.InstancedMesh(shareGeometry(this.veg.impostorGeometry), this.veg.impostorMaterial, n);
+      const im = new THREE.InstancedMesh(shareGeometry(this.veg.impostorGeometry), this.veg.impostorMaterialFading, n);
       im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
       const tile = new Float32Array(n), rand = new Float32Array(n);
       for (let i = 0; i < n; i++) {
@@ -504,7 +529,7 @@ export class ChunkManager {
     // Ground cover (LOD0 only): purely visual.
     const cn = msg.cover.length / COVER_STRIDE;
     if (cn > 0) {
-      const im = new THREE.InstancedMesh(shareGeometry(this.veg.coverGeometry), this.veg.coverMaterial, cn);
+      const im = new THREE.InstancedMesh(shareGeometry(this.veg.coverGeometry), this.veg.coverMaterialFading, cn);
       im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
       const tile = new Float32Array(cn), rand = new Float32Array(cn);
       for (let i = 0; i < cn; i++) {
@@ -523,6 +548,27 @@ export class ChunkManager {
       finish(im);
     }
     this.treeCount += n;
+  }
+
+  /**
+   * Like removeChunkObjects, but a replaced vegetation representation keeps
+   * drawing while it dissolves out (its death time is written to every
+   * instance); the terrain and water swap immediately, which is invisible.
+   */
+  private retireChunkObjects(rec: ChunkRecord): void {
+    if (rec.treeMeshes.length > 0 && this.time > 0) {
+      for (const im of rec.treeMeshes) {
+        const life = im.geometry.getAttribute('aLife') as THREE.InstancedBufferAttribute | undefined;
+        if (life) { for (let i = 0; i < life.count; i++) life.setY(i, this.time); life.needsUpdate = true; }
+        im.material = this.veg.fadingTwin(im.material as THREE.Material);
+        this.fading.push({ im, until: this.time + 0.85 });
+      }
+      this.treeCount -= rec.trees.length / TREE_STRIDE;
+      rec.treeMeshes.length = 0;
+      rec.trees = new Float32Array(0);
+      rec.heights = null;
+    }
+    this.removeChunkObjects(rec);
   }
 
   private removeChunkObjects(rec: ChunkRecord): void {
@@ -627,6 +673,9 @@ export class ChunkManager {
 
   dispose(): void {
     this.installQueue.length = 0;
+    for (const { im } of this.fading) { this.root.remove(im); disposeInstanceGeometry(im.geometry); im.dispose(); }
+    this.fading.length = 0;
+    this.settling.length = 0;
     for (const rec of Array.from(this.chunks.values())) this.disposeChunk(rec);
     for (const rec of Array.from(this.far.values())) this.disposeFar(rec);
     this.pool.dispose();

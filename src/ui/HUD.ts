@@ -40,7 +40,16 @@ export class HUD {
   private last: Partial<Record<string, string | number | boolean>> = {};
   /** Called when the on-screen "Reset view" button is pressed. */
   onSettings: (() => void) | null = null;
+  onPhoto: (() => void) | null = null;
   onResetView: (() => void) | null = null;
+
+  private liftShown = false;
+  /** Rising-air indicator: appears while lift is meaningful. */
+  setLift(lift: number): void {
+    const show = lift > 0.6;
+    if (show !== this.liftShown) { this.liftShown = show; this.root.querySelector<HTMLElement>('.hud-lift')!.hidden = !show; }
+    if (show) this.root.querySelector<HTMLElement>('.hud-lift-value')!.textContent = lift.toFixed(1);
+  }
 
   /** Show the reset-view button only while a free-look orbit is active. */
   setFreeLook(active: boolean): void {
@@ -69,8 +78,10 @@ export class HUD {
           <div class="hud-stat hud-stat-small"><span class="hud-stat-value hud-asl">0</span><span class="hud-stat-unit">m above sea</span></div>
         </div>
         <div class="hud-boost" title="Boost (hold Shift)"><div class="hud-boost-fill"></div></div>
+        <div class="hud-lift" hidden title="Rising air is lifting you"><span class="hud-lift-arrow">▲</span> <span class="hud-lift-value">0.0</span> m/s</div>
       </div>
       <button class="hud-settings" type="button" aria-label="Settings">Settings</button>
+      <button class="hud-photo" type="button" aria-label="Photo mode" title="Photo mode (P)">Photo</button>
       <div class="hud-time"></div>
       <div class="hud-toasts" aria-live="polite"></div>`;
     // The HUD must never intercept pointer/wheel events meant for the canvas.
@@ -92,6 +103,7 @@ export class HUD {
       });
     };
     tapOnly(this.root.querySelector<HTMLElement>('.hud-settings')!, () => this.onSettings?.());
+    tapOnly(this.root.querySelector<HTMLElement>('.hud-photo')!, () => this.onPhoto?.());
     const q = <T extends HTMLElement>(s: string) => this.root.querySelector<T>(s)!;
     this.speedEl = q('.hud-speed');
     this.altEl = q('.hud-alt');

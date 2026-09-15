@@ -235,6 +235,8 @@ body.has-touch.hud-toasts { top: 170px; }
 .settings :focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
 .bird-description { align-self: center; margin: 0; }
 @media (max-width: 560px) { .settings-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; } .settings-header, .settings-footer { padding: 14px 16px; } .settings-body { padding: 0 16px 16px; } .settings-header h2 { font-size: 18px; } }
+.hud-photo { position: absolute; left: 14px; bottom: 92px; pointer-events: auto; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-bg-strong); color: var(--ui-text); padding: 9px 14px; cursor: pointer; min-height: 40px; }
+body.has-touch .hud-photo { left: auto; right: 14px; top: 112px; bottom: auto; }
 .hud-settings { position: absolute; left: 14px; bottom: 44px; pointer-events: auto; border: 1px solid var(--ui-border); border-radius: 10px; background: var(--ui-bg-strong); color: var(--ui-text); padding: 9px 14px; cursor: pointer; min-height: 40px; }
 body.has-touch .hud-settings { left: auto; right: 14px; top: 64px; bottom: auto; }
 
@@ -255,3 +257,21 @@ body.has-touch .hud-settings { left: auto; right: 14px; top: 64px; bottom: auto;
 .bird-traits i { font-style: normal; color: var(--ui-muted); }
 .bird-traits b { font-weight: 400; letter-spacing: 1px; color: var(--accent); }
 @media (max-width: 520px) { .bird-picker { grid-template-columns: 1fr; } }
+
+/* Rising-air indicator under the readout. */
+.hud-lift { margin-top: 6px; text-align: center; font-size: 13px; color: var(--accent-2); background: var(--ui-bg); border: 1px solid var(--ui-border); border-radius: 999px; padding: 3px 12px; }
+.hud-lift-arrow { display: inline-block; animation: hud-lift-bob 1.1s ease-in-out infinite; }
+@keyframes hud-lift-bob { 0%, 100% { transform: translateY(1px); } 50% { transform: translateY(-2px); } }
+
+/* Photo mode: a small toolbar at the bottom; the rest of the overlay lets pointer events through to the canvas. */
+.photo { position: absolute; inset: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 8px; padding-bottom: 18px; }
+.photo-bar { pointer-events: auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 16px; padding: 10px 14px; max-width: calc(100vw - 32px); background: var(--ui-bg-strong); border: 1px solid var(--ui-border); border-radius: 14px; color: var(--ui-text); font-size: 13px; }
+.photo-title { font-weight: 600; margin-right: 4px; }
+.photo-bar label { display: flex; align-items: center; gap: 6px; }
+.photo-bar input[type="range"] { width: 120px; }
+.photo-bar output { font-family: var(--mono); font-size: 12px; min-width: 34px; }
+.photo-hint { order: -1; white-space: nowrap; pointer-events: none; }
+.photo-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+.photo-flash.is-on { animation: photo-flash 0.45s ease-out; }
+@keyframes photo-flash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
+@media (max-width: 640px) { .photo { padding-bottom: 10px; } .photo-bar { gap: 8px 12px; font-size: 12px; } .photo-bar input[type="range"] { width: 90px; } .photo-hint { display: none; } }

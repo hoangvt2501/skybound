@@ -59,6 +59,8 @@ export class CameraRig {
   private smoothedLook = new THREE.Vector3();
   private initialized = false;
   private fovCurrent = CAMERA.chase.fov;
+  /** Fixed field of view (degrees) while photo mode holds the lens; null = automatic. */
+  fovOverride: number | null = null;
   private shake = 0;
   private query: CameraQuery;
   private originX = 0;
@@ -262,7 +264,7 @@ export class CameraRig {
 
     // FOV: widen slightly with speed and boost unless reduced motion.
     const speedFov = this.reducedMotion ? 0 : THREE.MathUtils.clamp((bird.speed - 34) / 50, 0, 1) * 9 + (bird.boosting ? 3 : 0);
-    const fovTarget = preset.fov + speedFov;
+    const fovTarget = this.fovOverride ?? preset.fov + speedFov;
     this.fovCurrent += (fovTarget - this.fovCurrent) * approach(3, dt);
     if (Math.abs(this.camera.fov - this.fovCurrent) > 0.01) {
       this.camera.fov = this.fovCurrent;
