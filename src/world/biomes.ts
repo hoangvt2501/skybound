@@ -43,7 +43,6 @@ export const enum Species {
 }
 export const SPECIES_COUNT = 9;
 
-export const SPECIES_NAMES = ['oak', 'pine', 'birch', 'palm', 'cactus', 'deadwood', 'shrub', 'willow', 'rock'];
 
 /** Collision radius and height (m) for a unit-scale instance of each species. */
 export const SPECIES_COLLIDER: { radius: number; height: number }[] = [

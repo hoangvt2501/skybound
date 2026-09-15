@@ -396,20 +396,3 @@ export class BirdModel {
   }
 }
 
-/** Merge helper exported for tests/tools that want a single static geometry. */
-export function buildStaticBirdGeometry(): THREE.BufferGeometry {
-  const model = new BirdModel();
-  model.group.updateMatrixWorld(true);
-  const parts: THREE.BufferGeometry[] = [];
-  model.group.traverse((o) => {
-    if (o instanceof THREE.Mesh) {
-      const g = o.geometry.clone().applyMatrix4(o.matrixWorld);
-      g.deleteAttribute('uv');
-      parts.push(g.index ? g.toNonIndexed() : g);
-    }
-  });
-  const merged = mergeGeometries(parts, false)!;
-  for (const part of parts) part.dispose();
-  model.dispose();
-  return merged;
-}

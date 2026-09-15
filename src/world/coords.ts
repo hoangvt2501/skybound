@@ -39,9 +39,6 @@ export function wrapAngle(a: number): number {
 export function radToDeg(r: number): number {
   return (r * 180) / Math.PI;
 }
-export function degToRad(d: number): number {
-  return (d * Math.PI) / 180;
-}
 
 /** Compass heading in degrees [0, 360). */
 export function headingDegrees(heading: number): number {

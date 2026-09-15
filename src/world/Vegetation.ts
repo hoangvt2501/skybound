@@ -538,10 +538,6 @@ function boulder(seed: number): THREE.BufferGeometry {
 const BUILDERS: ((seed: number) => THREE.BufferGeometry)[] = [oak, pine, birch, palm, cactus, deadwood, shrub, willow, boulder];
 
 /** Build one species geometry (pure; no DOM). Exported for tests and tools. */
-export function buildTreeGeometry(species: Species, seed: number): THREE.BufferGeometry {
-  return BUILDERS[species](seed);
-}
-
 // ---------------------------------------------------------------------------
 // Impostor atlas & ground cover textures (procedural canvas)
 // ---------------------------------------------------------------------------

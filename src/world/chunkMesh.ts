@@ -76,9 +76,6 @@ export function chunkKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
 }
 
-export function worldToChunk(x: number, z: number): { cx: number; cz: number } {
-  return { cx: Math.floor(x / CHUNK_SIZE), cz: Math.floor(z / CHUNK_SIZE) };
-}
 
 /** Build the terrain mesh for chunk (cx,cz) at a LOD level. */
 export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: number, coverDensity = 0): ChunkMeshData {
