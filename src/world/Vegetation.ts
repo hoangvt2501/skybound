@@ -737,6 +737,37 @@ function paintGrassAtlas(): THREE.CanvasTexture {
 }
 
 /** Two crossed quads, base at y=0, unit size, normals up (flat lighting). */
+/**
+ * Shadow caster stand-in per species: a trunk and a crown blob of 30-40
+ * triangles in the same local metres as the tree geometry. Full trees do not
+ * cast shadows themselves (a 700-triangle crown per tree made the caster pass
+ * a fifth of the frame on integrated GPUs); these draw into the shadow map
+ * instead, and write nothing in the colour pass.
+ */
+function shadowProxy(species: Species): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  // Merge needs every part indexed the same way; the icosahedron is non-indexed, so drop the others' indices too.
+  const add = (g: THREE.BufferGeometry) => { const flat = g.index ? g.toNonIndexed() : g; if (flat !== g) g.dispose(); parts.push(flat); };
+  const trunk = (r: number, h: number) => { const g = new THREE.CylinderGeometry(r * 0.8, r, h, 5, 1); g.translate(0, h / 2, 0); add(g); };
+  const blob = (r: number, y: number, sx = 1, sy = 1, sz = 1) => { const g = new THREE.IcosahedronGeometry(r, 0); g.scale(sx, sy, sz); g.translate(0, y, 0); add(g); };
+  const cone = (r: number, h: number, y: number) => { const g = new THREE.ConeGeometry(r, h, 6, 1); g.translate(0, y + h / 2, 0); add(g); };
+  switch (species) {
+    case Species.Oak: trunk(0.35, 4.5); blob(4.2, 7.6, 1, 0.9, 1); break;
+    case Species.Pine: trunk(0.3, 3); cone(3.2, 12, 3); break;
+    case Species.Birch: trunk(0.25, 4); blob(2.6, 7.4, 1, 1.25, 1); break;
+    case Species.Palm: trunk(0.3, 8); blob(3.3, 8.6, 1, 0.5, 1); break;
+    case Species.Cactus: trunk(0.5, 4.5); break;
+    case Species.Deadwood: trunk(0.3, 5); blob(1.6, 4.6); break;
+    case Species.Shrub: blob(1.4, 1.1, 1, 0.8, 1); break;
+    case Species.Willow: trunk(0.4, 3); blob(3.6, 5, 1, 0.85, 1); break;
+    default: blob(1.9, 1.4, 1.4, 0.9, 1.2); break;
+  }
+  for (const p of parts) p.deleteAttribute('uv');
+  const merged = mergeGeometries(parts, false)!;
+  for (const p of parts) p.dispose();
+  return merged;
+}
+
 function crossQuads(): THREE.BufferGeometry {
   const a = new THREE.PlaneGeometry(1, 1, 1, 1).translate(0, 0.5, 0);
   const b = a.clone().rotateY(Math.PI / 2);
@@ -762,6 +793,9 @@ export class VegetationLibrary {
   readonly materialFading: VegetationMaterial;
   readonly impostorMaterialFading: BillboardMaterial;
   readonly coverMaterialFading: BillboardMaterial;
+  /** Colour-pass material of the shadow proxies: writes nothing; the shadow pass uses its own depth material. */
+  readonly shadowMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+  private proxies: THREE.BufferGeometry[] = [];
   private twins = new Map<THREE.Material, { fading: THREE.Material; settled: THREE.Material }>();
   private geometries: THREE.BufferGeometry[][] = [];
   private impostorTexture: THREE.Texture;
@@ -794,6 +828,11 @@ export class VegetationLibrary {
   fadingTwin(m: THREE.Material): THREE.Material { return this.twins.get(m)?.fading ?? m; }
   settledTwin(m: THREE.Material): THREE.Material { return this.twins.get(m)?.settled ?? m; }
 
+  /** Low-poly shadow caster geometry for a species (built on first use). */
+  shadowProxy(species: Species): THREE.BufferGeometry {
+    return (this.proxies[species] ??= shadowProxy(species));
+  }
+
   variants(species: Species): number {
     return this.geometries[species].length;
   }
@@ -816,6 +855,8 @@ export class VegetationLibrary {
 
   dispose(): void {
     for (const list of this.geometries) for (const g of list) g.dispose();
+    for (const p of this.proxies) p?.dispose();
+    this.shadowMaterial.dispose();
     this.material.dispose();
     this.materialFading.dispose();
     this.impostorMaterial.dispose();

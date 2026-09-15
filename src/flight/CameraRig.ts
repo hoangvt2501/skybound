@@ -14,7 +14,7 @@
  */
 import * as THREE from 'three';
 import { CAMERA } from '../core/config';
-import { headingToDir, wrapAngle } from '../world/coords';
+import { dirToHeading, headingToDir, wrapAngle } from '../world/coords';
 import type { FlightState, Obstacle } from './FlightController';
 import type { CameraInput } from './Input';
 
@@ -145,9 +145,18 @@ export class CameraRig {
     // released between frames.
     if (input.orbitYaw !== 0 || input.orbitPitch !== 0) {
       if (!this.freeLook) {
-        // Enter free-look from the current chase direction so there is no jump.
-        this.azimuth = wrapAngle(bird.heading + Math.PI);
-        this.elevation = presetElevation;
+        // Enter free-look from where the camera actually is, not from the chase target: after a
+        // turn the chase camera lags behind, sits off to the banked side and lower with the pitch,
+        // and the first drag frame used to snap all of that away toward the bird's heading.
+        const dx = this.smoothed.x - bird.x, dz = this.smoothed.z - bird.z, dy = this.smoothed.y - (bird.y + 0.6);
+        const horizontal = Math.hypot(dx, dz);
+        if (this.initialized && horizontal > 0.5) {
+          this.azimuth = dirToHeading(dx, dz);
+          this.elevation = THREE.MathUtils.clamp(Math.atan2(dy, horizontal), ELEVATION_MIN, ELEVATION_MAX);
+        } else {
+          this.azimuth = wrapAngle(bird.heading + Math.PI);
+          this.elevation = presetElevation;
+        }
       }
       this.freeLook = true;
       this.returning = false;
@@ -182,9 +191,11 @@ export class CameraRig {
       this.azimuth = targetAz;
       this.elevation = targetEl;
     }
-    // Look-ahead fades out while in free-look so the bird stays in frame.
+    // Look-ahead fades out while in free-look so the bird stays in frame. The fade out is slow
+    // (about two seconds): a fast one read as the camera swinging toward the bird by itself right
+    // after a drag began. Coming back to chase it returns quickly.
     const lookAheadTarget = this.freeLook ? 0 : 1;
-    this.lookAheadBlend += (lookAheadTarget - this.lookAheadBlend) * approach(4, dt);
+    this.lookAheadBlend += (lookAheadTarget - this.lookAheadBlend) * approach(this.freeLook ? 1.5 : 4, dt);
 
     // Desired camera position in global space (spherical around the pivot).
     const dist = this.mode === 'chase' ? this.distance : this.distance * (CAMERA.cinematic.distance / CAMERA.chase.distance);
@@ -255,9 +266,10 @@ export class CameraRig {
     _look.set(this.smoothedLook.x - this.originX, this.smoothedLook.y, this.smoothedLook.z - this.originZ);
     _m.lookAt(this.camera.position, _look, _up);
     _q.setFromRotationMatrix(_m);
-    // Follow a fraction of the bird's roll in chase only.
+    // Follow a fraction of the bird's roll in chase only; a drag that starts mid-turn levels the
+    // horizon gently instead of in a few frames.
     const rollTarget = this.freeLook ? 0 : bird.roll * (this.reducedMotion ? 0.1 : CAMERA.rollFollow);
-    this.rollSmooth += (rollTarget - this.rollSmooth) * approach(6, dt);
+    this.rollSmooth += (rollTarget - this.rollSmooth) * approach(this.freeLook ? 2 : 6, dt);
     _qRoll.setFromAxisAngle(_zAxis, this.rollSmooth);
     _q.multiply(_qRoll);
     this.camera.quaternion.copy(_q);

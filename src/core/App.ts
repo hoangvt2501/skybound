@@ -16,6 +16,7 @@ import { BirdModel } from '../flight/Bird';
 import { renderBirdPortraits } from '../ui/BirdPortraits';
 import { PhotoPanel } from '../ui/PhotoPanel';
 import { SplashEffects } from '../atmosphere/Splash';
+import { ScaledFrame } from './ScaledFrame';
 import { LightShafts } from '../atmosphere/LightShafts';
 import { Airflow, type Thermal } from '../flight/Airflow';
 import { ThermalMotes } from '../atmosphere/ThermalMotes';
@@ -138,7 +139,16 @@ export class App {
   private pixelRatio = 1;
   private lastDprAdjust = 0;
   private lastDprDrop = -Infinity;
+  private lastTransientDrop = -Infinity;
+  private lastProbeUp = -Infinity;
+  private lastProbeJudged = -Infinity;
+  private preProbeScale = MIN_RENDER_SCALE;
+  /** Consecutive probes up that missed; each one doubles the wait before the ceiling is retried. */
+  private probeFailures = 0;
+  private settleUntil = -Infinity;
   private shadersWarm = false;
+  /** Scene renders at `pixelRatio` into a scaled target and is upsampled onto the full-size canvas. */
+  private frame = new ScaledFrame();
   private dprCeiling = Infinity;
   private missedFrames = 0;
   private windowFrames = 0;
@@ -173,9 +183,12 @@ export class App {
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.shadowMap.enabled = this.quality.shadows;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    // The canvas keeps the preset's pixel ratio for the whole session; the adaptive render scale
+    // lives in `frame` (a scaled render target), so scale changes never resize the canvas.
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this.frame.setSize(window.innerWidth * this.pixelRatio, window.innerHeight * this.pixelRatio);
     this.camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.3, 30000);
     this.scene.add(this.worldRoot);
 
@@ -230,6 +243,7 @@ export class App {
     this.wildlife = new Wildlife(this.gen, (x, z) => this.chunks.surfaceAt(x, z));
     this.scene.add(this.wildlife.group);
     this.wildlife.onFishSplash = (x, z, landing) => { if (landing) this.splash.splash(x, z, 0.12); else this.splash.ring(x, z, 0.7); };
+    this.wildlife.onDuckStartle = (x, z) => { this.splash.ring(x, z, 0.9); this.splash.ring(x + 1.6, z - 1.1, 0.6); this.splash.ring(x - 1.2, z + 1.4, 0.6); };
     this.wildlife.thermalFinder = (x, z, r) => this.airflow.thermalsNear(x, z, r, this.thermalScratch)[0] ?? null;
     this.cameraRig = new CameraRig(this.camera, {
       surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
@@ -439,6 +453,7 @@ export class App {
     for (const o of onDemand) o.visible = true;
     try {
       this.renderer.compile(this.scene, this.camera);
+      this.frame.warm(this.renderer);
       // compile() only queues the links (KHR_parallel_shader_compile); the link result is read on a
       // program's first use, which would block that frame. Read it now, while the start screen is up.
       for (const program of this.renderer.info.programs ?? []) program.getUniforms();
@@ -544,7 +559,9 @@ export class App {
     }
 
     // Bounded GPU uploads of finished chunks/tiles each frame.
-    this.chunks.processInstalls(this.phase === 'flying' ? 2 : 8, this.phase === 'flying' ? 2 : 12);
+    // One chunk per frame while flying: each install also means the GPU uploads and vertex-array setup
+    // of the new meshes on their first draw, and two in one frame pushed a 13 ms frame past the refresh.
+    this.chunks.processInstalls(this.phase === 'flying' ? 2 : 8, this.phase === 'flying' ? 1 : 12);
 
     if (this.worldMap.isOpen) {
       // Map covers the screen; skip the 3D render but keep streaming alive.
@@ -642,15 +659,17 @@ export class App {
     this.hemi.color.copy(pal.ambientSky);
     this.hemi.groundColor.copy(pal.ambientGround);
     this.hemi.intensity = pal.ambientIntensity;
+    // Fog distance is rebuilt from the preset every frame (moods and the valley only scale it), so no
+    // per-frame factor can compound: with sky moods off, the valley's factor used to multiply the
+    // previous frame's value until the whole world was fogged out.
+    let fogFar = this.quality.fogFar;
     // Sky moods: slowly drifting haze and cloud cover so the same route never looks the same twice.
     if (this.settings.skyMoods) {
       const t = this.simTime, seedPhase = (this.seed % 1000) * 0.0063;
       // Mostly clear-to-light haze; heavy haze and overcast are the occasional extremes, never the norm.
       const haze = THREE.MathUtils.clamp(0.34 + 0.32 * Math.sin(t / 171 + seedPhase) * Math.sin(t / 263 + seedPhase * 1.7) + 0.22 * Math.sin(t / 97 + 4.5), 0, 1);
       const cloudiness = THREE.MathUtils.clamp(0.5 + 0.5 * Math.sin(t / 211 + seedPhase * 2.3) * Math.cos(t / 149 + 0.6), 0, 1);
-      const q = this.quality;
-      this.fog.far = q.fogFar * THREE.MathUtils.lerp(1.15, 0.55, haze);
-      this.fog.near = this.fog.far * 0.22;
+      fogFar *= THREE.MathUtils.lerp(1.15, 0.55, haze);
       _hazeTint.set(0.93, 0.9, 0.86).multiplyScalar(THREE.MathUtils.lerp(0.9, 1.05, pal.daylight));
       pal.fog.lerp(_hazeTint, haze * 0.32 * pal.daylight);
       pal.horizon.lerp(_hazeTint, haze * 0.26 * pal.daylight);
@@ -659,7 +678,7 @@ export class App {
       this.clouds.setCoverage(0.5 + 0.7 * cloudiness);
       this.skyMoodState.haze = haze; this.skyMoodState.cloudiness = cloudiness;
     } else if (this.skyMoodState.haze !== 0) {
-      this.fog.far = this.quality.fogFar; this.fog.near = this.fog.far * 0.22; this.clouds.setCoverage(1);
+      this.clouds.setCoverage(1);
       this.skyMoodState.haze = 0; this.skyMoodState.cloudiness = 0;
     }
     // The mist valley: banks thin out over the day, sun shafts appear when a low sun lies along
@@ -675,8 +694,7 @@ export class App {
       this.shafts.update(this.simTime, this.day.sunDir, this.camera.position, this.origin.value.x, this.origin.value.z, shaftStrength * 0.9);
       if (vm > 0.001) {
         const haze = vm * mist;
-        this.fog.far *= THREE.MathUtils.lerp(1, 0.6, haze);
-        this.fog.near = this.fog.far * 0.22;
+        fogFar *= THREE.MathUtils.lerp(1, 0.6, haze);
         _hazeTint.set(0.96, 0.9, 0.82).multiplyScalar(THREE.MathUtils.lerp(0.85, 1.05, pal.daylight));
         pal.fog.lerp(_hazeTint, haze * 0.4 * pal.daylight);
         pal.horizon.lerp(_hazeTint, haze * 0.3 * pal.daylight);
@@ -684,6 +702,8 @@ export class App {
       }
       this.skyMoodState.valley = vm;
     }
+    this.fog.far = fogFar;
+    this.fog.near = fogFar * 0.22;
     this.fog.color.copy(pal.fog);
     this.renderer.setClearColor(pal.fog);
     this.sky.update(this.camera.position, pal, this.day.sunDir, this.day.moonDir, this.simTime);
@@ -699,7 +719,7 @@ export class App {
   }
 
   private render(): void {
-    this.renderer.render(this.scene, this.camera);
+    this.frame.render(this.renderer, this.scene, this.camera);
     this.adjustResolution();
     // Compile every program once the opening chunks are in, while the start screen is still up.
     if (!this.shadersWarm && this.phase === 'start' && this.wallTime > 1.5 && this.chunks.isLoadedAt(this.flight.state.x, this.flight.state.z)) { this.shadersWarm = true; this.warmShaders(); }
@@ -719,27 +739,56 @@ export class App {
   private adjustResolution(): void {
     // Runs on the start screen too (the same world renders behind it), so the scale is settled before the flight begins.
     if (!this.settings.dynamicResolution || (this.phase !== 'flying' && this.phase !== 'start')) { this.missedFrames = 0; this.windowFrames = 0; return; }
-    if (this.wallTime - this.lastDprAdjust < 1.5 || this.windowFrames < 30) return;
+    // The frames right after a scale change include the target reallocation itself; they say nothing
+    // about the new scale, so they are not counted.
+    if (this.wallTime < this.settleUntil) { this.missedFrames = 0; this.windowFrames = 0; return; }
+    if (this.wallTime - this.lastDprAdjust < 1.5 || this.windowFrames < 60) return;
     const missRatio = this.missedFrames / this.windowFrames;
     this.missedFrames = 0; this.windowFrames = 0;
     const maxPr = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
     let next = this.pixelRatio;
-    // A scale that missed refreshes becomes the ceiling; probes stop one step below it and the
-    // ceiling relaxes upward only slowly, so the scale does not oscillate around the limit.
-    if (this.wallTime - this.lastDprDrop > 120 && this.dprCeiling < maxPr) { this.dprCeiling = Math.min(maxPr, this.dprCeiling + 0.05); this.lastDprDrop = this.wallTime - 100; }
+    // The ceiling is set only when a probe up fails within a few seconds: that scale is genuinely
+    // too expensive. Misses at a scale that had been holding for a while come from streaming
+    // (uploads, installs, a burst after a turn) and only lower the scale for the moment, so the game
+    // does not sit at the floor for minutes after the GPU has room again. The ceiling relaxes after
+    // 45 clean seconds (then every 10 s) so a heavier stretch is retried eventually; every probe that
+    // fails at that ceiling doubles the wait (45 s, 90 s, 180 s, up to 6 min), so a scale the GPU
+    // cannot hold is not retried every minute and the picture does not breathe.
+    const relaxDelay = Math.min(360, 45 * 2 ** this.probeFailures);
+    if (this.wallTime - this.lastDprDrop > relaxDelay && this.dprCeiling < maxPr) { this.dprCeiling = Math.min(maxPr, this.dprCeiling + 0.05); this.lastDprDrop = this.wallTime - (relaxDelay - 10); }
+    // A probe that has held for 6 s without a miss is a success: the retry wait starts over.
+    if (this.lastProbeUp > this.lastProbeJudged && this.wallTime - this.lastProbeUp >= 6 && missRatio <= 0.12) { this.lastProbeJudged = this.lastProbeUp; this.probeFailures = 0; }
     const probeLimit = Math.min(maxPr, this.dprCeiling - 0.05);
-    // Each scale change reallocates the drawing buffer (a visible hitch), so a badly missing
-    // window steps down in one larger move instead of several small ones.
-    const step = missRatio > 0.45 ? 0.25 : missRatio > 0.25 ? 0.15 : 0.1;
+    // A scale change only resizes the scaled render target (see ScaledFrame), so a badly missing
+    // window can step down decisively and a clean one can probe up in small steps.
+    const step = missRatio > 0.45 ? 0.2 : missRatio > 0.25 ? 0.1 : 0.05;
     // Below 0.7 the picture turns to mush; a few missed refreshes are the better trade there.
-    if (missRatio > 0.12 && this.pixelRatio > MIN_RENDER_SCALE) { this.dprCeiling = this.pixelRatio; next = Math.max(MIN_RENDER_SCALE, this.pixelRatio - step); this.lastDprDrop = this.wallTime; }
-    else if (missRatio < 0.03 && this.pixelRatio < probeLimit && this.wallTime - this.lastDprDrop > 15) next = Math.min(probeLimit, this.pixelRatio + 0.05);
+    if (missRatio > 0.12 && this.pixelRatio > MIN_RENDER_SCALE) {
+      const probeFailed = this.wallTime - this.lastProbeUp < 6;
+      if (probeFailed) {
+        // The scale it came from was holding a moment ago: go straight back there, not further.
+        this.dprCeiling = this.pixelRatio; this.lastDprDrop = this.wallTime; this.lastProbeJudged = this.lastProbeUp; this.probeFailures++;
+        next = Math.max(MIN_RENDER_SCALE, Math.min(this.preProbeScale, this.pixelRatio - 0.05));
+      } else {
+        next = Math.max(MIN_RENDER_SCALE, this.pixelRatio - step);
+      }
+      this.lastTransientDrop = this.wallTime;
+    } else if (missRatio < 0.03 && this.pixelRatio < probeLimit && this.wallTime - this.lastDprDrop > 8 && this.wallTime - this.lastTransientDrop > 4) {
+      this.preProbeScale = this.pixelRatio;
+      next = Math.min(probeLimit, this.pixelRatio + 0.05);
+      this.lastProbeUp = this.wallTime;
+    }
     if (Math.abs(next - this.pixelRatio) > 0.01) {
       this.pixelRatio = next;
-      this.renderer.setPixelRatio(next);
-      this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+      this.applyRenderScale();
       this.lastDprAdjust = this.wallTime;
+      this.settleUntil = this.wallTime + 0.6;
     }
+  }
+
+  /** Render scale relative to the canvas' fixed pixel ratio. */
+  private applyRenderScale(): void {
+    this.frame.setScale(this.pixelRatio / this.renderer.getPixelRatio());
   }
 
   private updateUI(dt: number): void {
@@ -995,7 +1044,11 @@ export class App {
 
   /** Render the current view and hand the PNG to the browser as a download. */
   private capturePhoto(): void {
-    this.renderer.render(this.scene, this.camera);
+    // Photos are taken at the canvas' full resolution, whatever the adaptive scale is at the time.
+    const liveScale = this.frame.getScale();
+    this.frame.setScale(1);
+    this.frame.render(this.renderer, this.scene, this.camera);
+    this.frame.setScale(liveScale);
     const url = this.renderer.domElement.toDataURL('image/png');
     this.lastPhotoBytes = url.length;
     const a = document.createElement('a');
@@ -1155,8 +1208,7 @@ export class App {
     if (s.quality !== prevQuality) this.applyQuality(QUALITY_PRESETS[s.quality]);
     if (!s.dynamicResolution && (prevDynamic || s.quality !== prevQuality)) {
       this.pixelRatio = Math.min(window.devicePixelRatio || 1, this.quality.maxPixelRatio);
-      this.renderer.setPixelRatio(this.pixelRatio);
-      this.onResize();
+      this.applyRenderScale();
     }
   }
 
@@ -1180,6 +1232,7 @@ export class App {
     this.pixelRatio = Math.min(window.devicePixelRatio || 1, q.maxPixelRatio);
     this.dprCeiling = Infinity; this.lastDprDrop = -Infinity;
     this.renderer.setPixelRatio(this.pixelRatio);
+    this.applyRenderScale();
     this.onResize();
     this.chunks.update(this.flight.state.x, this.flight.state.z, Math.sin(this.flight.state.heading), -Math.cos(this.flight.state.heading), this.wallTime, true);
   }
@@ -1221,6 +1274,7 @@ export class App {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h, false);
+    this.frame.setSize(w * this.renderer.getPixelRatio(), h * this.renderer.getPixelRatio());
     this.minimap.resize();
   };
 
@@ -1332,6 +1386,7 @@ export class App {
     this.splash.dispose();
     this.shafts.dispose();
     this.motes.dispose();
+    this.frame.dispose();
     this.audio.dispose();
     this.renderer.dispose();
   }

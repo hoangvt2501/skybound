@@ -4,6 +4,7 @@
  * ShaderMaterial; per-vertex `depth` carries terrain height under the surface.
  */
 import * as THREE from 'three';
+import { NOISE_CELLS, noiseTexture } from '../world/NoiseTexture';
 
 export class WaterMaterial extends THREE.ShaderMaterial {
   constructor() {
@@ -12,6 +13,7 @@ export class WaterMaterial extends THREE.ShaderMaterial {
         THREE.UniformsLib.fog,
         {
           uTime: { value: 0 },
+          uNoise: { value: null },
           uOrigin: { value: new THREE.Vector2(0, 0) },
           uSunDir: { value: new THREE.Vector3(0.3, 0.8, 0.2) },
           uSunColor: { value: new THREE.Color(1, 0.95, 0.85) },
@@ -78,23 +80,18 @@ export class WaterMaterial extends THREE.ShaderMaterial {
         varying float vCrest;
         varying vec2 vWaveSlope;
         #include <fog_pars_fragment>
+        uniform sampler2D uNoise;
 
-        float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-        float vnoise(vec2 p) {
-          vec2 i = floor(p); vec2 f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          float a = hash(i), b = hash(i + vec2(1.0, 0.0)), c = hash(i + vec2(0.0, 1.0)), d = hash(i + vec2(1.0, 1.0));
-          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-        }
-        float rippleField(vec2 p, float t) {
-          return vnoise(p * 0.055 + vec2(t * 0.05, t * 0.035)) + 0.5 * vnoise(p * 0.16 - vec2(t * 0.07, t * 0.045));
-        }
+        // Baked, tileable value noise (see NoiseTexture): R = value, GB = its gradient in lattice units.
+        float vnoise(vec2 p) { return texture2D(uNoise, p * ${(1 / NOISE_CELLS).toFixed(8)}).r; }
+        vec3 vnoise3(vec2 p) { vec3 t = texture2D(uNoise, p * ${(1 / NOISE_CELLS).toFixed(8)}).rgb; return vec3(t.r, (t.gb - 0.5) * 3.0); }
+        // Ripple normal from the analytic gradient of two noise octaves (the old finite differences
+        // sampled 0.8 m apart, so the gradient is scaled by that step to keep the same strength).
         vec3 ripple(vec2 p, float t, float strength) {
-          float e = 0.8;
-          float n0 = rippleField(p, t);
-          float nx = rippleField(p + vec2(e, 0.0), t);
-          float nz = rippleField(p + vec2(0.0, e), t);
-          return normalize(vec3(-(nx - n0) * strength, 1.0, -(nz - n0) * strength));
+          vec3 n1 = vnoise3(p * 0.055 + vec2(t * 0.05, t * 0.035));
+          vec3 n2 = vnoise3(p * 0.16 - vec2(t * 0.07, t * 0.045));
+          vec2 g = (n1.yz * 0.055 + 0.5 * n2.yz * 0.16) * 0.8;
+          return normalize(vec3(-g.x * strength, 1.0, -g.y * strength));
         }
 
         void main() {
@@ -151,5 +148,6 @@ export class WaterMaterial extends THREE.ShaderMaterial {
       fog: true,
       side: THREE.FrontSide,
     });
+    this.uniforms.uNoise.value = noiseTexture();
   }
 }

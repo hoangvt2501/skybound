@@ -104,8 +104,8 @@ export class InputManager {
     const dy = e.clientY - this.lastY;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
-    this.camera.orbitYaw -= dx * 0.006 * this.sensitivity;
-    this.camera.orbitPitch -= dy * 0.005 * this.sensitivity;
+    this.camera.orbitYaw -= dx * CAMERA.mouseYawPerPixel * this.sensitivity;
+    this.camera.orbitPitch -= dy * CAMERA.mousePitchPerPixel * this.sensitivity;
   }
 
   private onPointerUp(e: PointerEvent): void {
@@ -121,8 +121,8 @@ export class InputManager {
 
   /** External camera drag (touch). */
   applyCameraDrag(dx: number, dy: number): void {
-    this.camera.orbitYaw -= dx * 0.006 * this.sensitivity;
-    this.camera.orbitPitch -= dy * 0.005 * this.sensitivity;
+    this.camera.orbitYaw -= dx * CAMERA.mouseYawPerPixel * this.sensitivity;
+    this.camera.orbitPitch -= dy * CAMERA.mousePitchPerPixel * this.sensitivity;
   }
 
   applyZoom(delta: number): void {

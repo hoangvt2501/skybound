@@ -31,7 +31,22 @@ export function habitatAt(height: number, slope: number, biome: Biome): Habitat 
 
 type Kind = 'bird' | 'deer' | 'duck' | 'balloon' | 'boat' | 'fish';
 const KINDS: readonly Kind[] = ['bird', 'deer', 'duck', 'balloon', 'boat', 'fish'];
-interface Encounter { x: number; y: number; z: number; phase: number; kind: Kind; count: number; radius: number }
+/**
+ * A reaction to the player, evaluated on the GPU from its start time: a flock scatters outward and
+ * closes up again (mode 1), deer run (mode 2) or ducks swim (mode 3) `dist` metres along a planned
+ * direction and stay there; `dh` is the ground height change over the run. When it expires the
+ * displacement is baked into the encounter position, so the next rebuild places the animals where
+ * the shader left them.
+ */
+export interface Reaction { start: number; dirX: number; dirZ: number; mode: 1 | 2 | 3; dist: number; dh: number; until: number }
+interface Encounter { x: number; y: number; z: number; phase: number; kind: Kind; count: number; radius: number; react?: Reaction | null; cooldownUntil?: number }
+/** Reaction tuning: trigger radius (m), run distance (m), animation length (s) and the hold before baking. */
+const REACT = {
+  bird: { radius: 55, dist: 0, seconds: 3.2, hold: 0 },
+  deer: { radius: 45, dist: 22, seconds: 3, hold: 6 },
+  duck: { radius: 35, dist: 9, seconds: 3, hold: 6 },
+  cooldown: 14, maxActive: 4, scanInterval: 0.25,
+} as const;
 type JobKind = 'ground' | 'air' | 'balloon';
 const CAPACITY: Record<Kind, number> = { bird: 32, deer: 12, duck: 16, balloon: 3, boat: 5, fish: 16 };
 const MAX_DISTANCE: Record<Kind, number> = { bird: 1600, deer: 550, duck: 550, balloon: 2800, boat: 1400, fish: 420 };
@@ -155,6 +170,9 @@ export class Wildlife {
   thermalFinder: ((x: number, z: number, radius: number) => { x: number; z: number; radius: number; base: number; top: number } | null) | null = null;
   /** Called when a fish breaks the surface (landing = true when it falls back in). */
   onFishSplash: ((x: number, z: number, landing: boolean) => void) | null = null;
+  /** Called when ducks push off from the player (ripples). */
+  onDuckStartle: ((x: number, z: number) => void) | null = null;
+  private lastReactScan = -Infinity;
 
   constructor(private gen: WorldGen, private surfaceAt: (x: number, z: number) => number) {
     this.rings = { bird: this.makeRing('bird'), deer: this.makeRing('deer'), duck: this.makeRing('duck'), balloon: this.makeRing('balloon'), boat: this.makeRing('boat'), fish: this.makeRing('fish') };
@@ -181,11 +199,22 @@ export class Wildlife {
         attribute float aMotion;
         attribute float aPhase;
         attribute vec4 aOrbit; // radius, angular speed, start angle, bob amplitude
+        attribute vec4 aReact; // reaction start time, run direction x/z, mode + packed ground delta
         vec3 wildRotate(vec3 v, float heading) { float c = cos(heading), s = sin(heading); return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z); }`);
       shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
         float wildAngle = aOrbit.z + uWildTime * aOrbit.y;
         // Local -Z forward follows the circle tangent; leaping fish (aMotion 6) keep a fixed heading.
         float wildHeading = aMotion > 5.5 ? PI - aOrbit.z : PI - wildAngle;
+        // Reaction state: rt = seconds since it started, mode 1 scatter, 2 run, 3 swim.
+        float reactMode = floor(aReact.w);
+        float reactT = uWildTime - aReact.x;
+        float reactOn = (reactMode > 0.5 && reactT > 0.0) ? 1.0 : 0.0;
+        // Runners and swimmers face their run direction, easing back to the circle tangent at the end.
+        float faceRun = reactOn * step(1.5, reactMode) * (1.0 - smoothstep(3.0, 3.8, reactT));
+        if (faceRun > 0.001) {
+          vec2 f = normalize(mix(vec2(-sin(wildHeading), -cos(wildHeading)), normalize(aReact.yz), faceRun));
+          wildHeading = atan(-f.x, -f.y);
+        }
         objectNormal = wildRotate(objectNormal, wildHeading);`);
       shader.vertexShader = shader.vertexShader.replace('#include <color_vertex>', `#include <color_vertex>
         #ifdef USE_COLOR
@@ -224,11 +253,29 @@ export class Wildlife {
           float depth = mix(-1.4, up - 0.7, leaping); // starts and ends 0.7 m under, clears the surface by up to 2.3 m
           transformed += vec3(-sin(wildHeading) * along, depth, -cos(wildHeading) * along);
         } else {
+          if (reactOn > 0.5 && reactMode > 1.5 && reactT < 3.0) {
+            // Gallop / paddle: a quick bob while running, and deer lift the head (aMotion 2 parts) first.
+            transformed.y += abs(sin(reactT * (reactMode < 2.5 ? 9.0 : 6.0))) * (reactMode < 2.5 ? 0.12 : 0.05);
+            if (reactMode < 2.5 && aMotion > 1.5 && aMotion < 2.5) transformed.y += 0.14 * sin(3.14159 * clamp(reactT / 0.9, 0.0, 1.0));
+          }
           transformed = wildRotate(transformed * wildFade, wildHeading);
           transformed += vec3(cos(wildAngle) * aOrbit.x, aOrbit.w * sin(uWildTime * 0.4 + aPhase), sin(wildAngle) * aOrbit.x);
+          if (reactOn > 0.5) {
+            if (reactMode < 1.5) {
+              // The flock bursts outward from its circle and drifts back into formation.
+              float s = sin(3.14159 * clamp(reactT / 3.2, 0.0, 1.0)) * (0.6 + 0.4 * fract(aPhase * 0.37));
+              transformed += vec3(cos(wildAngle), 0.45, sin(wildAngle)) * (16.0 * s);
+            } else {
+              // Run or swim along the planned direction and settle at its end (the CPU bakes it in later).
+              float k = clamp(reactT / 3.0, 0.0, 1.0); k = k * k * (3.0 - 2.0 * k);
+              float dist = reactMode < 2.5 ? 22.0 : 9.0;
+              float dh = fract(aReact.w) * 32.0 - 8.0;
+              transformed += vec3(aReact.y * dist * k, dh * k, aReact.z * dist * k);
+            }
+          }
         }`);
     };
-    material.customProgramCacheKey = () => 'skybound-wildlife-v4';
+    material.customProgramCacheKey = () => 'skybound-wildlife-v5';
     this.materials.push(material);
     const ring: THREE.InstancedMesh[] = [];
     for (let slot = 0; slot < RING; slot++) {
@@ -236,6 +283,7 @@ export class Wildlife {
       const capacity = CAPACITY[kind];
       g.setAttribute('aPhase', new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1));
       g.setAttribute('aOrbit', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4));
+      g.setAttribute('aReact', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4).fill(0), 4));
       const mesh = new THREE.InstancedMesh(g, material, capacity);
       mesh.count = 0; mesh.frustumCulled = false; mesh.visible = slot === 0;
       mesh.name = `wildlife-${kind}-${slot}`;
@@ -333,6 +381,7 @@ export class Wildlife {
     const changed = mode !== this.lastMode || quality !== this.lastQuality;
     this.lastMode = mode; this.lastQuality = quality;
     this.fishSplashes(time);
+    if (time - this.lastReactScan >= REACT.scanInterval) { this.lastReactScan = time; this.scanReactions(time, px, py, pz); }
     const moved = !(Math.hypot(px - this.builtX, pz - this.builtZ) <= REBUILD_DISTANCE);
     const rebased = ox !== this.builtOX || oz !== this.builtOZ;
     const drained = job !== undefined && this.pending.length === 0; // last habitat of a cell change: show it even if the clock is paused
@@ -374,13 +423,78 @@ export class Wildlife {
         mesh.setMatrixAt(index, _matrix.compose(_position, _rotation, _scale));
         (mesh.geometry.attributes.aPhase as THREE.InstancedBufferAttribute).setX(index, e.phase + j);
         (mesh.geometry.attributes.aOrbit as THREE.InstancedBufferAttribute).setXYZW(index, radius, speed, angle0, bob);
+        const r = e.react;
+        (mesh.geometry.attributes.aReact as THREE.InstancedBufferAttribute).setXYZW(index, r ? r.start : -1e9, r ? r.dirX : 0, r ? r.dirZ : 0, r ? r.mode + (Math.max(-8, Math.min(7.9, r.dh)) + 8) / 32 : 0);
       }
     }
     for (const kind of KINDS) {
       const mesh = target[kind]; mesh.count = used[kind];
-      if (used[kind] > 0) { mesh.instanceMatrix.needsUpdate = true; mesh.geometry.attributes.aPhase.needsUpdate = true; mesh.geometry.attributes.aOrbit.needsUpdate = true; }
+      if (used[kind] > 0) { mesh.instanceMatrix.needsUpdate = true; mesh.geometry.attributes.aPhase.needsUpdate = true; mesh.geometry.attributes.aOrbit.needsUpdate = true; mesh.geometry.attributes.aReact.needsUpdate = true; }
       for (const other of this.rings[kind]) other.visible = other === mesh;
     }
+  }
+
+  /**
+   * Low-rate reaction pass: animals near the player start a reaction (at most a few at once, with a
+   * cooldown per group); expired runs are baked into the group position so the next rebuild keeps
+   * the animals where they ended up. Distances are checked per group, never per animal pair.
+   */
+  private scanReactions(time: number, px: number, py: number, pz: number): void {
+    let active = 0;
+    for (const e of this.encounters.values()) if (e?.react) active++;
+    for (const e of this.encounters.values()) {
+      if (!e || (e.kind !== 'bird' && e.kind !== 'deer' && e.kind !== 'duck')) continue;
+      const r = e.react;
+      if (r) {
+        if (time < r.until) continue;
+        if (r.mode !== 1) { e.x += r.dirX * r.dist; e.z += r.dirZ * r.dist; e.y += r.dh; }
+        e.react = null; this.dirty = true; active--;
+        continue;
+      }
+      if (active >= REACT.maxActive || time < (e.cooldownUntil ?? -Infinity)) continue;
+      const tune = REACT[e.kind];
+      const dx = e.x - px, dz = e.z - pz, dy = e.y - py;
+      const near = e.kind === 'bird' ? Math.hypot(dx, dy, dz) < e.radius + tune.radius : Math.hypot(dx, dz) < tune.radius && py - e.y < 60;
+      if (!near) continue;
+      const planned = this.planReaction(e, px, pz, time);
+      e.cooldownUntil = time + REACT.cooldown;
+      if (!planned) continue;
+      e.react = planned; active++;
+      this.dirty = true; this.builtAt = -Infinity; // show it on this update rather than after the coalescing interval
+      if (e.kind === 'duck') this.onDuckStartle?.(e.x, e.z);
+    }
+  }
+
+  /**
+   * Choose the reaction for a group: flocks scatter in place; deer and ducks run away from the player
+   * along the first direction (away, then swung sideways, then reversed) whose whole path stays on
+   * ground they can use: deer on gentle land close to their own height, ducks on water.
+   */
+  planReaction(e: Encounter, px: number, pz: number, time: number): Reaction | null {
+    let ax = e.x - px, az = e.z - pz;
+    const l = Math.hypot(ax, az);
+    if (l < 1e-3) { ax = Math.cos(e.phase); az = Math.sin(e.phase); } else { ax /= l; az /= l; }
+    if (e.kind === 'bird') return { start: time, dirX: ax, dirZ: az, mode: 1, dist: 0, dh: 0, until: time + REACT.bird.seconds };
+    const tune = e.kind === 'deer' ? REACT.deer : REACT.duck;
+    for (const a of [0, 0.7, -0.7, 1.4, -1.4, Math.PI]) {
+      const c = Math.cos(a), s = Math.sin(a);
+      const dx = ax * c - az * s, dz = ax * s + az * c;
+      const ex = e.x + dx * tune.dist, ez = e.z + dz * tune.dist;
+      const he = this.gen.heightAt(ex, ez), hm = this.gen.heightAt(e.x + dx * tune.dist * 0.5, e.z + dz * tune.dist * 0.5);
+      if (e.kind === 'deer') {
+        if (he > 1.5 && hm > 1.5 && Math.abs(he - e.y) < 4 && Math.abs(hm - e.y) < 4 && this.gen.slopeAt(ex, ez) < 0.28) return { start: time, dirX: dx, dirZ: dz, mode: 2, dist: tune.dist, dh: he - e.y, until: time + tune.seconds + tune.hold };
+      } else if (he < -0.5 && hm < -0.5) {
+        return { start: time, dirX: dx, dirZ: dz, mode: 3, dist: tune.dist, dh: 0, until: time + tune.seconds + tune.hold };
+      }
+    }
+    return null;
+  }
+
+  /** Groups currently reacting, by kind (diagnostics and tests). */
+  reactions(): { kind: Kind; mode: number; x: number; z: number; until: number }[] {
+    const out: { kind: Kind; mode: number; x: number; z: number; until: number }[] = [];
+    for (const e of this.encounters.values()) if (e?.react) out.push({ kind: e.kind, mode: e.react.mode, x: e.x, z: e.z, until: e.react.until });
+    return out;
   }
 
   /** Mirror of the shader's leap cycle: a ring when a fish launches (cycle wraps) and a splash when it lands (cycle passes 0.32). */

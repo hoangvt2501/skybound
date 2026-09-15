@@ -10,29 +10,55 @@
  *    up by noise so boundaries are irregular rather than jagged,
  *  - wet, darkened banks near the water line.
  * Color math is done in linear space (vertex colors are linearized upstream).
+ *
+ * Geomorph: a per-vertex `aMorph` attribute (parent height, parent normal)
+ * holds the coarser representation's surface; `uMorph` blends from it (0) to
+ * this LOD's own surface (1). Only chunks in transition carry a material twin
+ * with their own `uMorph`; settled chunks share one material at 1.
  */
 import * as THREE from 'three';
+import { NOISE_CELLS, noiseTexture } from './NoiseTexture';
+
+export interface TerrainUniforms {
+  uOrigin: { value: THREE.Vector2 };
+  uDetail: { value: number };
+  uNoise: { value: THREE.Texture };
+}
 
 export class TerrainMaterial extends THREE.MeshLambertMaterial {
-  readonly terrainUniforms = {
-    uOrigin: { value: new THREE.Vector2(0, 0) },
-    uDetail: { value: 1 },
-  };
+  readonly terrainUniforms: TerrainUniforms;
+  /** Geomorph progress for the meshes using this material instance: 0 = parent surface, 1 = own surface. */
+  readonly morphUniform = { value: 1 };
 
-  constructor() {
+  constructor(uniforms?: TerrainUniforms) {
     super({ vertexColors: true });
+    this.terrainUniforms = uniforms ?? { uOrigin: { value: new THREE.Vector2(0, 0) }, uDetail: { value: 1 }, uNoise: { value: noiseTexture() } };
     this.onBeforeCompile = (shader) => {
       shader.uniforms.uOrigin = this.terrainUniforms.uOrigin;
       shader.uniforms.uDetail = this.terrainUniforms.uDetail;
+      shader.uniforms.uNoise = this.terrainUniforms.uNoise;
+      shader.uniforms.uMorph = this.morphUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           '#include <common>',
           `#include <common>
           attribute vec4 aux;
+          attribute vec4 aMorph;
           uniform vec2 uOrigin;
+          uniform float uMorph;
           varying vec4 vAux;
           varying vec3 vWPos;
           varying vec3 vWNormal;`,
+        )
+        .replace(
+          '#include <beginnormal_vertex>',
+          `#include <beginnormal_vertex>
+          objectNormal = normalize(mix(aMorph.yzw, objectNormal, uMorph));`,
+        )
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          transformed.y = mix(aMorph.x, transformed.y, uMorph);`,
         )
         .replace(
           '#include <worldpos_vertex>',
@@ -49,21 +75,21 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
           '#include <common>',
           `#include <common>
           uniform float uDetail;
+          uniform sampler2D uNoise;
           varying vec4 vAux;
           varying vec3 vWPos;
           varying vec3 vWNormal;
-          float tHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-          float tNoise(vec2 p) {
-            vec2 i = floor(p); vec2 f = fract(p);
-            f = f * f * (3.0 - 2.0 * f);
-            float a = tHash(i), b = tHash(i + vec2(1.0, 0.0)), c = tHash(i + vec2(0.0, 1.0)), d = tHash(i + vec2(1.0, 1.0));
-            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-          }`,
+          // Baked, tileable value noise (see NoiseTexture): one filtered fetch per lookup.
+          float tNoise(vec2 p) { return texture2D(uNoise, p * ${(1 / NOISE_CELLS).toFixed(8)}).r; }`,
         )
         .replace(
           '#include <color_fragment>',
           `#include <color_fragment>
-          {
+          // Sea bed more than 3 m under the surface: the water above hides all detail, so skip it
+          // (over open sea the bed and the far shell under the water were a third of the fill cost).
+          if (vWPos.y < -3.0) {
+            diffuseColor.rgb *= 0.85;
+          } else {
             vec3 col = diffuseColor.rgb;
             vec3 wn = normalize(vWNormal);
             float steep = 1.0 - wn.y;
@@ -72,16 +98,20 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
             float midFade = 1.0 - smoothstep(900.0, 3200.0, dist);
             // Grain: fine near-field grain (near pixels only) and a broader mid-field mottle.
             float n1 = nearFade > 0.001 ? tNoise(vWPos.xz * 0.45) : 0.5;
-            float n2 = tNoise(vWPos.xz * 0.06 + 3.1);
+            // The mid-field mottle carries a finer octave: the old sine-hash noise picked up grain from
+            // float imprecision at large coordinates, and without it the 16 m blobs read too clean.
+            float n2 = tNoise(vWPos.xz * 0.06 + 3.1) * 0.7 + tNoise(vWPos.xz * 0.21 + 5.7) * 0.3;
             float n3 = tNoise(vWPos.xz * 0.012 + 9.7);
-            col *= 1.0 + (n1 - 0.5) * 0.16 * nearFade + (n2 - 0.5) * 0.12 * midFade + (n3 - 0.5) * 0.08;
+            // Mottle contrast is lower than with the old sine hash: at large coordinates that hash lost
+            // precision and clustered its values, so the baked noise reads stronger for the same weight.
+            col *= 1.0 + (n1 - 0.5) * 0.16 * nearFade + (n2 - 0.5) * 0.08 * midFade + (n3 - 0.5) * 0.05;
             // Rock on steep faces, using the interpolated normal. The strata and
             // crack work only runs where rock is actually visible.
             float rockMask = smoothstep(0.22, 0.46, steep + vAux.y * 0.16 + (n2 - 0.5) * 0.1);
             if (rockMask > 0.003) {
               vec3 rockA = vec3(0.155, 0.135, 0.115);
               vec3 rockB = vec3(0.30, 0.27, 0.235);
-              vec3 rockCol = mix(rockA, rockB, n3);
+              vec3 rockCol = mix(rockA, rockB, 0.25 + 0.5 * n3);
               // Strata: gently warped bands, broken by grain so they never read as contour lines.
               float strata = 0.5 + 0.5 * sin(vWPos.y * 0.3 + (n2 - 0.5) * 6.0 + (n3 - 0.5) * 3.0 + vWPos.x * 0.002);
               // Break the bands with the 16 m mottle (and near grain) so they
@@ -116,7 +146,12 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
           }`,
         );
     };
-    this.customProgramCacheKey = () => 'skybound-terrain-v1';
+    this.customProgramCacheKey = () => 'skybound-terrain-v6';
+  }
+
+  /** A material instance for one morphing chunk: same program and shared uniforms, its own `uMorph`. */
+  morphTwin(): TerrainMaterial {
+    return new TerrainMaterial(this.terrainUniforms);
   }
 
   setOrigin(x: number, z: number): void {

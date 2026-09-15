@@ -27,6 +27,8 @@ export type WorkerResponse =
       aux: Float32Array;
       indices: Uint32Array;
       heights: Float32Array;
+      parentHeights: Float32Array;
+      morph: Float32Array;
       segments: number;
       spacing: number;
       minHeight: number;
@@ -76,6 +78,8 @@ ctx.onmessage = (e: MessageEvent<WorkerRequest>) => {
         aux: m.aux,
         indices: m.indices,
         heights: m.heights,
+        parentHeights: m.parentHeights,
+        morph: m.morph,
         segments: m.segments,
         spacing: m.spacing,
         minHeight: m.minHeight,
@@ -86,7 +90,7 @@ ctx.onmessage = (e: MessageEvent<WorkerRequest>) => {
         trees: m.trees,
         cover: m.cover,
       },
-      [m.positions.buffer, m.normals.buffer, m.colors.buffer, m.aux.buffer, m.indices.buffer, m.heights.buffer, m.trees.buffer, m.cover.buffer, m.waterDepth.buffer, m.waterExposure.buffer],
+      [m.positions.buffer, m.normals.buffer, m.colors.buffer, m.aux.buffer, m.indices.buffer, m.heights.buffer, m.parentHeights.buffer, m.morph.buffer, m.trees.buffer, m.cover.buffer, m.waterDepth.buffer, m.waterExposure.buffer],
     );
   } else if (msg.type === 'far') {
     const m = buildFarTile(gen, msg.tx, msg.tz);

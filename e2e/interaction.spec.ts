@@ -41,6 +41,41 @@ async function startFlight(page: Page) {
 const wrap = (a: number) => ((a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
 
 test.describe('Scene free-look', () => {
+  test('a drag starts from the displayed view: no snap toward the bird after a turn (photo mode)', async ({ page }) => {
+    test.setTimeout(240_000);
+    await startFlight(page);
+    // A held turn banks the bird and leaves the chase camera lagging and off to the side; photo mode then
+    // freezes the flight in that state, so the only thing that can move the camera is the drag itself.
+    await page.keyboard.down('KeyD');
+    await simWait(page, 1);
+    await page.keyboard.press('KeyP');
+    await page.keyboard.up('KeyD');
+    await page.waitForFunction(() => window.skybound.debug().phase === 'photo');
+    await page.waitForTimeout(2500); // chase smoothing converges on the frozen state
+    const camPos = () => page.evaluate(() => { const c = (window.skybound as any).camera.position; return [c.x, c.y, c.z]; });
+    const frame = () => page.evaluate(() => (window.skybound as any).wallTime as number);
+    const p0 = await camPos();
+    const heading = (await dbg(page)).heading;
+    const vp = page.viewportSize()!;
+    await page.mouse.move(vp.width / 2, vp.height / 2);
+    await page.mouse.down();
+    const t0 = await frame();
+    await page.mouse.move(vp.width / 2 + 2, vp.height / 2);
+    await page.waitForFunction((t) => (window.skybound as any).wallTime > t + 0.05, t0, { timeout: 20_000, polling: 30 });
+    const p1 = await camPos();
+    const after = await dbg(page);
+    await page.mouse.up();
+    // 2 px of drag orbit the camera by 0.007 rad, about 0.1 m at chase distance. The old rig re-seeded the
+    // orbit from the bird's heading and preset elevation and moved the camera 1.5-2 m in one frame.
+    const moved = Math.hypot(p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]);
+    expect(moved).toBeLessThan(0.5);
+    expect(after.cam.freeLook).toBe(true);
+    // The orbit was seeded from where the camera was (off to the banked side), not from behind the bird.
+    expect(Math.abs(wrap(after.cam.azimuth - (heading + Math.PI)))).toBeGreaterThan(0.03);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.skybound.debug().phase === 'flying');
+  });
+
   test('drag orbits the bird, the view is kept for 5 s while the bird keeps flying, V resets', async ({ page }) => {
     test.setTimeout(300_000);
     await startFlight(page);

@@ -24,6 +24,18 @@ describe('rising air', () => {
     expect(air.lift(t.x, mid, t.z, 0.05).thermal).toBe(0);
     expect(air.lift(t.x, t.top + 20, t.z, 0.5).thermal).toBeLessThan(0.01);
   });
+  it('fades out at the top of a thermal that stands on high ground (top is absolute, the profile is relative)', () => {
+    // Regression: the fade-out compared the height above the base with the absolute top altitude, so a
+    // thermal with a high base kept lifting far above its top. Inject a column on 800 m ground.
+    const high = new Airflow(gen);
+    const cell = { x: 700 * 1000.5, z: 700 * 1000.5, radius: 100, base: 800, top: 1400, strength: 4 };
+    (high as unknown as { cache: Map<string, typeof cell> }).cache.set('1000,1000', cell);
+    expect(high.lift(cell.x, cell.base + 300, cell.z, 0.5).thermal).toBeGreaterThan(3.5);
+    expect(high.lift(cell.x, cell.top - 250, cell.z, 0.5).thermal).toBeGreaterThan(3);
+    expect(high.lift(cell.x, cell.top - 50, cell.z, 0.5).thermal).toBeLessThan(cell.strength * 0.5);
+    expect(high.lift(cell.x, cell.top + 20, cell.z, 0.5).thermal).toBeLessThan(0.01);
+    expect(high.lift(cell.x, cell.top + 500, cell.z, 0.5).thermal).toBe(0);
+  });
   it('gives ridge lift low over a slope that faces the wind and none on the lee side', () => {
     // Search the range for a clear upwind slope and its mirror.
     let best: { x: number; z: number; up: number } | null = null;

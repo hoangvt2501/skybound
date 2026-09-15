@@ -45,7 +45,9 @@ export class Airflow {
     const key = `${cx},${cz}`;
     const cached = this.cache.get(key);
     if (cached !== undefined) return cached;
-    if (this.cache.size > 600) this.cache.clear();
+    // Bounded cache: drop the oldest fifth instead of everything, so a long flight never
+    // recomputes the whole neighbourhood in one step.
+    if (this.cache.size > 600) { let drop = 120; for (const k of this.cache.keys()) { this.cache.delete(k); if (--drop === 0) break; } }
     const rng = new Rng(hash2(cx, cz, this.gen.seed ^ 0x7e4a));
     let thermal: Thermal | null = null;
     if (rng.next() < 0.42) {
@@ -89,8 +91,12 @@ export class Airflow {
         const r = d / t.radius;
         if (r >= 1) continue;
         const radial = (1 - r * r) * (1 - r * r);
+        // Heights relative to the column base: `t.top` is absolute, so the fade-out near the top must
+        // compare against the column's own height, not the top's altitude (a thermal on 800 m ground
+        // would otherwise keep lifting 800 m above its top).
         const h = y - t.base;
-        const profile = smooth(h / 60) * (1 - smooth((h - (t.top - 150)) / 150));
+        const columnHeight = t.top - t.base;
+        const profile = smooth(h / 60) * (1 - smooth((h - (columnHeight - 150)) / 150));
         out.thermal += t.strength * radial * profile * daylight;
       }
     }

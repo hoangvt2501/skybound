@@ -64,8 +64,11 @@ export class WorkerPool {
   enqueue(req: Exclude<WorkerRequest, { type: 'init' }>, priority: number): boolean {
     if (this.disposed) return false;
     const job: Job = { req, priority };
-    this.queue.push(job);
-    this.queue.sort((a, b) => a.priority - b.priority);
+    // Binary insertion keeps the queue ordered without re-sorting it on every request (a ring of
+    // 289 chunks arrives in one update after a teleport or a preset change).
+    let lo = 0, hi = this.queue.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (this.queue[mid].priority <= priority) lo = mid + 1; else hi = mid; }
+    this.queue.splice(lo, 0, job);
     let kept = true;
     if (this.queue.length > this.maxQueue) {
       // Drop the lowest-priority jobs and tell their owners so they can retry.

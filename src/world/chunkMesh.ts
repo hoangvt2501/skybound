@@ -55,6 +55,13 @@ export interface ChunkMeshData {
   indices: Uint32Array;
   /** (segments+1)^2 heights for collision, row-major with x fastest. */
   heights: Float32Array;
+  /**
+   * The coarser representation's surface at every grid vertex (the next LOD, or the far shell for the
+   * coarsest LOD): geomorph source for collision blending, same layout as `heights`.
+   */
+  parentHeights: Float32Array;
+  /** Per vertex (grid + skirt): parent height and parent normal, the geomorph source for the shader. */
+  morph: Float32Array;
   segments: number;
   spacing: number;
   minHeight: number;
@@ -85,16 +92,18 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
   const ox = cx * CHUNK_SIZE;
   const oz = cz * CHUNK_SIZE;
 
-  // Sample grid with a one-vertex ring for normals: (n+2)^2. The full sample
-  // is cached per vertex so the color pass does not re-evaluate the noise.
-  const gn = n + 2;
+  // Sample grid with a two-vertex ring: ring 1 for the fine normals, ring 2 for
+  // the normals of the parent (coarser) surface used by the geomorph. The full
+  // sample is cached per vertex so the color pass does not re-evaluate the noise.
+  const RING = 2;
+  const gn = n + 2 * RING;
   const grid = new Float32Array(gn * gn);
   const cache = new Float32Array(gn * gn * SAMPLE_STRIDE);
   const sample = createTerrainSample();
   for (let j = 0; j < gn; j++) {
-    const z = oz + (j - 1) * spacing;
+    const z = oz + (j - RING) * spacing;
     for (let i = 0; i < gn; i++) {
-      const x = ox + (i - 1) * spacing;
+      const x = ox + (i - RING) * spacing;
       gen.sample(x, z, sample);
       const gi = j * gn + i;
       grid[gi] = sample.height;
@@ -107,14 +116,16 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
   const normals = new Float32Array(vertCount * 3);
   const colors = new Float32Array(vertCount * 3);
   const aux = new Float32Array(vertCount * 4);
+  const morph = new Float32Array(vertCount * 4);
   const heights = new Float32Array(n * n);
+  const parentHeights = new Float32Array(n * n);
   let minH = Infinity, maxH = -Infinity;
 
   for (let j = 0; j < n; j++) {
     const z = oz + j * spacing;
     for (let i = 0; i < n; i++) {
       const x = ox + i * spacing;
-      const gi = (j + 1) * gn + (i + 1);
+      const gi = (j + RING) * gn + (i + RING);
       const h = grid[gi];
       const vi = j * n + i;
       heights[vi] = h;
@@ -139,6 +150,54 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
     }
   }
 
+  // Geomorph source: the surface of the next coarser representation at every vertex. The coarser
+  // LOD samples the same world positions at twice the spacing, so its vertices are this grid's
+  // even vertices and its triangles (same a-d diagonal) are reproduced exactly by interpolating
+  // those even vertices; its normals are the central differences two vertices apart. For the
+  // coarsest LOD the parent is the far shell: the same grid at twice the spacing, water clamped
+  // below the surface and sunk by FAR_TILE_Y_OFFSET, so a chunk rising out of the shell morphs
+  // instead of popping.
+  {
+    const isFarParent = lod === LOD_SPACING.length - 1;
+    const parentOf = (h: number) => (isFarParent ? (h < SEA_LEVEL ? Math.min(h, SEA_LEVEL - 4) : h) + FAR_TILE_Y_OFFSET : h);
+    const coarseH = (i: number, j: number) => parentOf(grid[(j + RING) * gn + (i + RING)]);
+    const coarseN = (i: number, j: number, out: Float32Array, o: number) => {
+      const gi = (j + RING) * gn + (i + RING);
+      const dx = (grid[gi + 2] - grid[gi - 2]) / (4 * spacing);
+      const dz = (grid[gi + 2 * gn] - grid[gi - 2 * gn]) / (4 * spacing);
+      let nx = -dx, ny = 1, nz = -dz;
+      const il = 1 / Math.hypot(nx, ny, nz);
+      out[o] = nx * il; out[o + 1] = ny * il; out[o + 2] = nz * il;
+    };
+    const na = new Float32Array(3), nb = new Float32Array(3), nc = new Float32Array(3), nd = new Float32Array(3);
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const vi = j * n + i;
+        const i0 = i & ~1, j0 = j & ~1; // coarse cell corner (n-1 is even, so the cell always exists)
+        const tx = (i - i0) * 0.5, tz = (j - j0) * 0.5;
+        // The far corners of the last row/column lie outside the chunk and carry zero weight; clamp
+        // them onto the edge so they stay finite (their ±2 neighbours would leave the sample grid).
+        const i1 = Math.min(i0 + 2, n - 1), j1 = Math.min(j0 + 2, n - 1);
+        const ha = coarseH(i0, j0), hb = coarseH(i1, j0), hc = coarseH(i0, j1), hd = coarseH(i1, j1);
+        coarseN(i0, j0, na, 0); coarseN(i1, j0, nb, 0); coarseN(i0, j1, nc, 0); coarseN(i1, j1, nd, 0);
+        let ph: number, pnx: number, pny: number, pnz: number;
+        if (tx > tz) {
+          ph = ha + (hb - ha) * tx + (hd - hb) * tz;
+          pnx = na[0] + (nb[0] - na[0]) * tx + (nd[0] - nb[0]) * tz;
+          pny = na[1] + (nb[1] - na[1]) * tx + (nd[1] - nb[1]) * tz;
+          pnz = na[2] + (nb[2] - na[2]) * tx + (nd[2] - nb[2]) * tz;
+        } else {
+          ph = ha + (hc - ha) * tz + (hd - hc) * tx;
+          pnx = na[0] + (nc[0] - na[0]) * tz + (nd[0] - nc[0]) * tx;
+          pny = na[1] + (nc[1] - na[1]) * tz + (nd[1] - nc[1]) * tx;
+          pnz = na[2] + (nc[2] - na[2]) * tz + (nd[2] - nc[2]) * tx;
+        }
+        parentHeights[vi] = ph;
+        morph[vi * 4] = ph; morph[vi * 4 + 1] = pnx; morph[vi * 4 + 2] = pny; morph[vi * 4 + 3] = pnz;
+      }
+    }
+  }
+
   // Skirt vertices: copies of edge vertices dropped down, same normal/color.
   const skirtDepth = spacing * SKIRT_DEPTH_FACTOR + 8;
   let sv = n * n;
@@ -157,6 +216,10 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
     aux[sv * 4 + 1] = aux[src * 4 + 1];
     aux[sv * 4 + 2] = aux[src * 4 + 2];
     aux[sv * 4 + 3] = aux[src * 4 + 3];
+    morph[sv * 4] = morph[src * 4] - skirtDepth;
+    morph[sv * 4 + 1] = morph[src * 4 + 1];
+    morph[sv * 4 + 2] = morph[src * 4 + 2];
+    morph[sv * 4 + 3] = morph[src * 4 + 3];
     skirtIndex[k] = sv;
     sv++;
   };
@@ -221,7 +284,7 @@ export function buildChunkMesh(gen: WorldGen, cx: number, cz: number, lod: numbe
   return {
     cx, cz, lod,
     positions, normals, colors, aux, indices,
-    heights, segments: segs, spacing,
+    heights, parentHeights, morph, segments: segs, spacing,
     minHeight: minH, maxHeight: maxH,
     hasWater, waterDepth, waterExposure,
     trees,

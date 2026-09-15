@@ -115,9 +115,11 @@ export const FLIGHT = {
   glidePitch: -0.045,
   pitchRate: 1.9,
   pitchReturnRate: 1.1,
-  maxTurnRate: 1.35,
-  turnResponse: 3.2,
-  maxBank: 1.05,
+  /** Full-stick turn rate at cruise (rad/s), scaled by the species' agility. Was 1.35: too twitchy with a mouse hand on A/D. */
+  maxTurnRate: 1.05,
+  turnResponse: 2.6,
+  /** Bank at full turn (rad); 45 degrees reads as a committed turn without the horizon tipping past comfort. Was 1.05 (60 degrees). */
+  maxBank: 0.78,
   bankResponse: 3.4,
   flapPitchBoost: 0.28,
   boostCapacity: 100,
@@ -144,6 +146,9 @@ export const CAMERA = {
   minClearance: 2.2,
   orbitReturnDelay: 1.6,
   orbitReturnRate: 2.4,
+  /** Free-look drag: radians of orbit per pixel at sensitivity 1 (0.2 and 0.17 degrees; were 0.006 / 0.005 rad). */
+  mouseYawPerPixel: 0.0035,
+  mousePitchPerPixel: 0.003,
 } as const;
 
 export const AUTOPILOT = {
@@ -152,7 +157,8 @@ export const AUTOPILOT = {
   cruiseAboveGround: 95,
   minAboveGround: 40,
   turnGain: 0.9,
-  maxTurnInput: 0.75,
+  /** Raised with the slower manual turn rate so the autopilot keeps the same authority (~1.0 rad/s). */
+  maxTurnInput: 0.95,
   arriveRadius: 130,
   loiterRadius: 210,
   wanderPeriod: 47,

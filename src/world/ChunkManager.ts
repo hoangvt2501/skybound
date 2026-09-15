@@ -5,7 +5,7 @@
  */
 import * as THREE from 'three';
 import {
-  CHUNK_SIZE, FAR_TILE_SIZE, LOD_RINGS, LOD_SPACING, SEA_LEVEL, VEGETATION_FULL_LOD, type QualitySettings,
+  CHUNK_SIZE, FAR_TILE_SIZE, LOD_RINGS, LOD_SPACING, SEA_LEVEL, VEGETATION_FULL_LOD, VEGETATION_MAX_LOD, type QualitySettings,
 } from '../core/config';
 import type { WorkerResponse } from '../workers/terrain.worker';
 import { WorkerPool } from '../workers/WorkerPool';
@@ -28,12 +28,35 @@ interface ChunkRecord {
   mesh: THREE.Mesh | null;
   water: THREE.Mesh | null;
   heights: Float32Array | null;
+  /** The coarser surface at the same grid (geomorph source), for collision blending. */
+  parentHeights: Float32Array | null;
+  /** Active geomorph of `mesh`: uMorph runs from `from` to `to` over MORPH_SECONDS from `start` (wall clock). */
+  morph: { start: number; from: number; to: number; material: TerrainMaterial } | null;
+  /** A coarser build waiting for the current mesh to morph down onto its surface before it swaps in. */
+  pendingSwap: Extract<WorkerResponse, { type: 'chunk' }> | null;
   segments: number;
   spacing: number;
   trees: Float32Array;
+  /** Tree representation currently instanced (full geometry near the player, impostors beyond). */
+  vegRep: VegRep;
   treeMeshes: THREE.InstancedMesh[];
+  coverMeshes: THREE.InstancedMesh[];
+  /** Low-poly shadow casters standing in for the full trees. */
+  shadowMeshes: THREE.InstancedMesh[];
+  /** Ground cover waiting for its own frame to be instanced. */
+  pendingCover: Float32Array | null;
   lastWanted: number;
 }
+
+type VegRep = 'none' | 'full' | 'impostor';
+/** Chunk-centre distance (m) within which trees are drawn as full geometry; beyond it plus the hysteresis, impostors. */
+const FULL_TREE_DISTANCE = 700;
+const FULL_TREE_HYSTERESIS = 120;
+
+/** Duration of a terrain LOD geomorph (wall clock). */
+const MORPH_SECONDS = 0.6;
+const COARSEST_LOD = LOD_SPACING.length - 1;
+function smoothstep01(t: number): number { const c = t < 0 ? 0 : t > 1 ? 1 : t; return c * c * (3 - 2 * c); }
 
 interface FarRecord {
   tx: number;
@@ -153,6 +176,11 @@ export class ChunkManager {
     return this.pool;
   }
 
+  /** Finished builds still waiting for their main-thread install (a cheap "is the streamer busy" signal). */
+  get installPending(): number {
+    return this.installQueue.length;
+  }
+
   /** Near-field terrain detail strength (0 disables grain/cracks; diagnostics and presets). */
   setDetail(v: number): void {
     (this.terrainMaterial as TerrainMaterial).terrainUniforms.uDetail.value = v;
@@ -168,7 +196,7 @@ export class ChunkManager {
     this.shadows = on;
     for (const rec of this.chunks.values()) {
       if (rec.mesh) rec.mesh.receiveShadow = on;
-      for (const t of rec.treeMeshes) t.castShadow = on;
+      for (const sm of rec.shadowMeshes) { sm.castShadow = on; sm.visible = on; }
     }
   }
 
@@ -203,6 +231,7 @@ export class ChunkManager {
     const moved = pcx !== this.lastPlayerChunk.cx || pcz !== this.lastPlayerChunk.cz;
     if (!force && !moved && now - this.lastUpdateTime < 0.4) return;
     this.lastUpdateTime = now;
+    this.viewX = gx; this.viewZ = gz;
     this.lastPlayerChunk.cx = pcx;
     this.lastPlayerChunk.cz = pcz;
     this.tick++;
@@ -225,17 +254,19 @@ export class ChunkManager {
         if (!rec) {
           rec = {
             cx, cz, key, lod: -1, wantedLod, requestId: 0, ring, mesh: null, water: null,
-            heights: null, segments: 0, spacing: 0, trees: new Float32Array(0), treeMeshes: [], lastWanted: this.tick,
+            heights: null, parentHeights: null, morph: null, pendingSwap: null, segments: 0, spacing: 0, trees: new Float32Array(0), vegRep: 'none', treeMeshes: [], coverMeshes: [], shadowMeshes: [], pendingCover: null, lastWanted: this.tick,
           };
           this.chunks.set(key, rec);
         }
         rec.lastWanted = this.tick;
         rec.ring = ring;
+        if (rec.mesh && rec.trees.length > 0 && rec.lod <= VEGETATION_FULL_LOD && this.wantedRep(rec) !== rec.vegRep) this.revegQueue.add(rec);
         // Hysteresis: only coarsen once we are a full ring beyond the boundary.
         let target = wantedLod;
         if (rec.lod >= 0 && target > rec.lod && ring < LOD_RINGS[target] + 1) target = rec.lod;
         rec.wantedLod = target;
-        if (rec.lod !== target && rec.requestId === 0) {
+        const swapPending = rec.pendingSwap !== null && rec.pendingSwap.lod === target;
+        if (rec.lod !== target && rec.requestId === 0 && !swapPending) {
           const ahead = dist > 0.01 ? (ex * fx + ez * fz) / dist : 1;
           const priority = dist - 1.4 * ahead + target * 0.6;
           this.requestChunk(rec, target, priority);
@@ -320,6 +351,15 @@ export class ChunkManager {
   private settling: { im: THREE.InstancedMesh; until: number }[] = [];
   /** Instanced meshes of a replaced representation, kept while they dissolve out. */
   private fading: { im: THREE.InstancedMesh; until: number }[] = [];
+  /** Chunks whose terrain mesh is geomorphing this frame. */
+  private morphing = new Set<ChunkRecord>();
+  /** Chunks whose tree representation should change (one is rebuilt per frame). */
+  private revegQueue = new Set<ChunkRecord>();
+  /** Chunks whose ground cover still has to be instanced (one per frame). */
+  private coverQueue: ChunkRecord[] = [];
+  /** Last position the wanted set was computed for (the look-ahead point while flying). */
+  private viewX = 0;
+  private viewZ = 0;
 
   private onResult(msg: WorkerResponse): void {
     // Defer GPU uploads to processInstalls() so a burst of results (start,
@@ -350,6 +390,18 @@ export class ChunkManager {
       // A mesh retired before it settled keeps the dissolving material until it is disposed.
       if (im.parent === this.root && life && life.getY(0) >= 1e9) im.material = this.veg.settledTwin(im.material as THREE.Material);
     }
+    this.stepMorphs();
+    if (this.revegQueue.size > 0) {
+      const rec = this.revegQueue.values().next().value as ChunkRecord;
+      this.revegQueue.delete(rec);
+      this.reinstanceTrees(rec);
+    }
+    while (this.coverQueue.length > 0) {
+      const rec = this.coverQueue.shift()!;
+      const cover = rec.pendingCover;
+      rec.pendingCover = null;
+      if (cover && rec.mesh) { this.buildCover(rec, cover); break; }
+    }
     if (this.installQueue.length === 0) return 0;
     const t0 = performance.now();
     let n = 0;
@@ -368,6 +420,7 @@ export class ChunkManager {
       if (!rec || rec.requestId !== msg.id) return; // stale
       rec.requestId = 0;
       this.installChunk(rec, msg);
+      if (rec.pendingSwap) return; // the coarser mesh swaps in when the geomorph completes
       if (!this.firstReadyFired && this.onFirstChunksReady) {
         // Consider the world ready when the player's ring-0/1 chunks exist.
         let ready = 0, wanted = 0;
@@ -408,15 +461,43 @@ export class ChunkManager {
     }
   }
 
+  /**
+   * A finished build arrives. Refinement (a finer LOD replacing a coarser one) and a coarsest chunk
+   * rising out of the far shell start at the parent surface and morph to their own over
+   * MORPH_SECONDS. Coarsening keeps the finer mesh, morphs it down onto the coarser surface, then
+   * swaps (see stepMorphs), so the terrain never pops at a ring boundary.
+   */
   private installChunk(rec: ChunkRecord, msg: Extract<WorkerResponse, { type: 'chunk' }>): void {
+    const live = rec.mesh !== null && rec.lod >= 0 && this.time > 0;
+    if (live && msg.lod > rec.lod) {
+      rec.pendingSwap = msg;
+      this.startMorph(rec, this.morphValue(rec), 0);
+      return;
+    }
+    rec.pendingSwap = null;
+    // A chunk rising out of the far shell starts a few metres above it: at 4 km the depth buffer
+    // resolves only ~3 m, so a coincident start would z-fight for the first frames.
+    const fromFar = !live && msg.lod === COARSEST_LOD && this.time > 0;
+    this.installChunkNow(rec, msg, live && msg.lod < rec.lod ? 0 : fromFar ? 0.25 : null);
+  }
+
+  private installChunkNow(rec: ChunkRecord, msg: Extract<WorkerResponse, { type: 'chunk' }>, morphFrom: number | null): void {
     this.retireChunkObjects(rec);
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(msg.positions, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(msg.normals, 3));
     g.setAttribute('color', new THREE.BufferAttribute(msg.colors, 3));
     g.setAttribute('aux', new THREE.BufferAttribute(msg.aux, 4));
+    g.setAttribute('aMorph', new THREE.BufferAttribute(msg.morph, 4));
     g.setIndex(new THREE.BufferAttribute(msg.indices, 1));
-    g.computeBoundingSphere();
+    // Bounding sphere from the worker's height range (plus the skirt) instead of a pass over 17k vertices.
+    {
+      const skirt = msg.spacing * 3 + 8;
+      const minY = msg.minHeight - skirt - 20; // the far-shell parent surface sits up to 18 m below the terrain
+      const maxY = msg.maxHeight + 20;
+      const half = CHUNK_SIZE / 2, halfY = (maxY - minY) / 2;
+      g.boundingSphere = new THREE.Sphere(new THREE.Vector3(half, (minY + maxY) / 2, half), Math.hypot(half, halfY, half));
+    }
     const mesh = new THREE.Mesh(g, this.terrainMaterial);
     mesh.position.set(rec.cx * CHUNK_SIZE, 0, rec.cz * CHUNK_SIZE);
     mesh.updateMatrix();
@@ -426,10 +507,12 @@ export class ChunkManager {
     rec.mesh = mesh;
     rec.lod = msg.lod;
     rec.heights = msg.heights;
+    rec.parentHeights = msg.parentHeights;
     rec.segments = msg.segments;
     rec.spacing = msg.spacing;
     rec.trees = msg.trees;
     this.triangleCount += msg.indices.length / 3;
+    if (morphFrom !== null) this.startMorph(rec, morphFrom, 1);
 
     if (msg.hasWater) {
       const wg = this.waterGeometry.clone();
@@ -444,110 +527,226 @@ export class ChunkManager {
       rec.water = water;
     }
 
-    const ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
     const n = msg.trees.length / TREE_STRIDE;
-    const finish = (im: THREE.InstancedMesh) => {
-      // Birth now, death never: the shader dissolves the instances in over 0.7 s.
-      const life = new Float32Array(im.count * 2);
-      for (let i = 0; i < im.count; i++) { life[i * 2] = this.time; life[i * 2 + 1] = 1e9; }
-      im.geometry.setAttribute('aLife', new THREE.InstancedBufferAttribute(life, 2));
-      this.settling.push({ im, until: this.time + 0.8 });
-      im.instanceMatrix.needsUpdate = true;
-      im.computeBoundingSphere();
-      im.position.set(ox, 0, oz);
-      im.updateMatrix();
-      im.matrixAutoUpdate = false;
-      this.root.add(im);
-      rec.treeMeshes.push(im);
-    };
-    if (n > 0 && msg.lod <= VEGETATION_FULL_LOD) {
+    rec.vegRep = 'none';
+    if (n > 0) this.buildTrees(rec, this.wantedRep(rec));
+    // Ground cover (up to ~1600 instances) is instanced on a later frame so one install never
+    // stacks terrain, trees and cover in the same frame.
+    rec.pendingCover = msg.cover.length > 0 ? msg.cover : null;
+    if (rec.pendingCover) this.coverQueue.push(rec);
+    this.treeCount += n;
+  }
+
+  /** Birth bookkeeping shared by every instanced vegetation mesh: dissolve in over 0.7 s, settle, chunk placement. */
+  private placeInstanced(rec: ChunkRecord, im: THREE.InstancedMesh, list: THREE.InstancedMesh[]): void {
+    const life = new Float32Array(im.count * 2);
+    for (let i = 0; i < im.count; i++) { life[i * 2] = this.time; life[i * 2 + 1] = 1e9; }
+    im.geometry.setAttribute('aLife', new THREE.InstancedBufferAttribute(life, 2));
+    this.settling.push({ im, until: this.time + 0.8 });
+    im.instanceMatrix.needsUpdate = true;
+    im.computeBoundingSphere();
+    im.position.set(rec.cx * CHUNK_SIZE, 0, rec.cz * CHUNK_SIZE);
+    im.updateMatrix();
+    im.matrixAutoUpdate = false;
+    this.root.add(im);
+    list.push(im);
+  }
+
+  /**
+   * Which tree representation a chunk should show. Full geometry only near the player (a 700-triangle
+   * tree at 600 m is a dozen pixels tall and costs the same vertex work as one next to the bird);
+   * impostors beyond, with hysteresis so a chunk on the boundary does not flip back and forth.
+   */
+  private wantedRep(rec: ChunkRecord): VegRep {
+    if (rec.trees.length === 0 || rec.lod > VEGETATION_MAX_LOD) return 'none';
+    if (rec.lod > VEGETATION_FULL_LOD) return 'impostor';
+    const d = Math.hypot((rec.cx + 0.5) * CHUNK_SIZE - this.viewX, (rec.cz + 0.5) * CHUNK_SIZE - this.viewZ);
+    if (d < FULL_TREE_DISTANCE) return 'full';
+    if (d > FULL_TREE_DISTANCE + FULL_TREE_HYSTERESIS) return 'impostor';
+    return rec.vegRep === 'none' ? 'full' : rec.vegRep;
+  }
+
+  /** Instance a chunk's trees as full geometry (with low-poly shadow casters) or as impostors. */
+  private buildTrees(rec: ChunkRecord, rep: VegRep): void {
+    const trees = rec.trees, n = trees.length / TREE_STRIDE, ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
+    rec.vegRep = rep;
+    if (n === 0 || rep === 'none') return;
+    if (rep === 'full') {
       // Full trees: one InstancedMesh per (species, geometry variant) present.
       // The variant is a stable hash of the tree position.
       const variantOf = (o: number) => {
-        const s = msg.trees[o + 3];
-        return hash2(Math.round(msg.trees[o] * 4), Math.round(msg.trees[o + 2] * 4), 77) % this.veg.variants(s);
+        const s = trees[o + 3];
+        return hash2(Math.round(trees[o] * 4), Math.round(trees[o + 2] * 4), 77) % this.veg.variants(s);
       };
       const key = (s: number, v: number) => s * 8 + v;
       const counts = new Map<number, number>();
       for (let i = 0; i < n; i++) {
         const o = i * TREE_STRIDE;
-        const k = key(msg.trees[o + 3], variantOf(o));
+        const k = key(trees[o + 3], variantOf(o));
         counts.set(k, (counts.get(k) ?? 0) + 1);
       }
-      const meshes = new Map<number, { im: THREE.InstancedMesh; rand: Float32Array; cursor: number }>();
+      const meshes = new Map<number, { im: THREE.InstancedMesh; shadow: THREE.InstancedMesh; rand: Float32Array; cursor: number }>();
       for (const [k, c] of counts) {
         const s = Math.floor(k / 8), v = k % 8;
         const im = new THREE.InstancedMesh(this.veg.geometry(s, v), this.veg.materialFading, c);
         im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-        im.castShadow = this.shadows;
-        const rand = new Float32Array(c);
-        meshes.set(k, { im, rand, cursor: 0 });
+        im.castShadow = false; // the proxy below casts instead
+        const shadow = new THREE.InstancedMesh(shareGeometry(this.veg.shadowProxy(s)), this.veg.shadowMaterial, c);
+        shadow.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+        shadow.castShadow = this.shadows; shadow.visible = this.shadows; shadow.receiveShadow = false;
+        meshes.set(k, { im, shadow, rand: new Float32Array(c), cursor: 0 });
       }
       for (let i = 0; i < n; i++) {
         const o = i * TREE_STRIDE;
-        const s = msg.trees[o + 3];
+        const s = trees[o + 3];
         const entry = meshes.get(key(s, variantOf(o)))!;
-        _p.set(msg.trees[o] - ox, msg.trees[o + 1] - 0.15, msg.trees[o + 2] - oz);
-        _q.setFromAxisAngle(_axis, msg.trees[o + 5]);
-        const sc = msg.trees[o + 4];
+        _p.set(trees[o] - ox, trees[o + 1] - 0.15, trees[o + 2] - oz);
+        _q.setFromAxisAngle(_axis, trees[o + 5]);
+        const sc = trees[o + 4];
         _s.set(sc, sc, sc);
         _m.compose(_p, _q, _s);
         entry.im.setMatrixAt(entry.cursor, _m);
-        entry.rand[entry.cursor] = hash2(Math.round(msg.trees[o] * 3), Math.round(msg.trees[o + 2] * 3), 913) / 4294967296;
+        entry.shadow.setMatrixAt(entry.cursor, _m);
+        entry.rand[entry.cursor] = hash2(Math.round(trees[o] * 3), Math.round(trees[o + 2] * 3), 913) / 4294967296;
         entry.cursor++;
       }
-      for (const { im, rand } of meshes.values()) {
+      for (const { im, shadow, rand } of meshes.values()) {
         // Per-instance random for crown displacement/wind phase. The geometry
         // is shared, so the attribute is attached to a shallow per-mesh copy.
         const g = shareGeometry(im.geometry);
         g.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
         im.geometry = g;
-        finish(im);
+        this.placeInstanced(rec, im, rec.treeMeshes);
+        shadow.instanceMatrix.needsUpdate = true;
+        shadow.computeBoundingSphere();
+        shadow.position.set(ox, 0, oz);
+        shadow.updateMatrix();
+        shadow.matrixAutoUpdate = false;
+        this.root.add(shadow);
+        rec.shadowMeshes.push(shadow);
       }
-    } else if (n > 0) {
+    } else {
       // Impostors: crossed billboards, one tile per species.
       const im = new THREE.InstancedMesh(shareGeometry(this.veg.impostorGeometry), this.veg.impostorMaterialFading, n);
       im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
       const tile = new Float32Array(n), rand = new Float32Array(n);
       for (let i = 0; i < n; i++) {
         const o = i * TREE_STRIDE;
-        const s = msg.trees[o + 3];
-        const sc = msg.trees[o + 4];
+        const s = trees[o + 3];
+        const sc = trees[o + 4];
         const [w, h] = IMPOSTOR_SIZE[s];
-        _p.set(msg.trees[o] - ox, msg.trees[o + 1] - 0.2, msg.trees[o + 2] - oz);
-        _q.setFromAxisAngle(_axis, msg.trees[o + 5]);
+        _p.set(trees[o] - ox, trees[o + 1] - 0.2, trees[o + 2] - oz);
+        _q.setFromAxisAngle(_axis, trees[o + 5]);
         _s.set(w * sc, h * sc, w * sc);
         _m.compose(_p, _q, _s);
         im.setMatrixAt(i, _m);
         tile[i] = s;
-        rand[i] = hash2(Math.round(msg.trees[o]), Math.round(msg.trees[o + 2]), 5) / 4294967296;
+        rand[i] = hash2(Math.round(trees[o]), Math.round(trees[o + 2]), 5) / 4294967296;
       }
       im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
       im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
-      finish(im);
+      this.placeInstanced(rec, im, rec.treeMeshes);
     }
-    // Ground cover (LOD0 only): purely visual.
-    const cn = msg.cover.length / COVER_STRIDE;
-    if (cn > 0) {
-      const im = new THREE.InstancedMesh(shareGeometry(this.veg.coverGeometry), this.veg.coverMaterialFading, cn);
-      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-      const tile = new Float32Array(cn), rand = new Float32Array(cn);
-      for (let i = 0; i < cn; i++) {
-        const o = i * COVER_STRIDE;
-        const sc = msg.cover[o + 3];
-        _p.set(msg.cover[o] - ox, msg.cover[o + 1] - 0.05, msg.cover[o + 2] - oz);
-        _q.setFromAxisAngle(_axis, msg.cover[o + 4]);
-        _s.set(1.4 * sc, 0.9 * sc, 1.4 * sc);
-        _m.compose(_p, _q, _s);
-        im.setMatrixAt(i, _m);
-        tile[i] = msg.cover[o + 5];
-        rand[i] = hash2(Math.round(msg.cover[o] * 2), Math.round(msg.cover[o + 2] * 2), 17) / 4294967296;
+  }
+
+  /** Ground cover (LOD0 only): purely visual. */
+  private buildCover(rec: ChunkRecord, cover: Float32Array): void {
+    const cn = cover.length / COVER_STRIDE, ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
+    const im = new THREE.InstancedMesh(shareGeometry(this.veg.coverGeometry), this.veg.coverMaterialFading, cn);
+    im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+    const tile = new Float32Array(cn), rand = new Float32Array(cn);
+    for (let i = 0; i < cn; i++) {
+      const o = i * COVER_STRIDE;
+      const sc = cover[o + 3];
+      _p.set(cover[o] - ox, cover[o + 1] - 0.05, cover[o + 2] - oz);
+      _q.setFromAxisAngle(_axis, cover[o + 4]);
+      _s.set(1.4 * sc, 0.9 * sc, 1.4 * sc);
+      _m.compose(_p, _q, _s);
+      im.setMatrixAt(i, _m);
+      tile[i] = cover[o + 5];
+      rand[i] = hash2(Math.round(cover[o] * 2), Math.round(cover[o + 2] * 2), 17) / 4294967296;
+    }
+    im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
+    im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+    this.placeInstanced(rec, im, rec.coverMeshes);
+  }
+
+  /** The player crossed a tree-detail boundary: the old representation dissolves out, the new one in. */
+  private reinstanceTrees(rec: ChunkRecord): void {
+    const want = this.wantedRep(rec);
+    if (want === rec.vegRep || !rec.mesh) return;
+    this.retireMeshes(rec.treeMeshes);
+    this.dropShadowMeshes(rec);
+    this.buildTrees(rec, want);
+  }
+
+  /** Keep instanced meshes drawing while they dissolve out (their death time is written to every instance). */
+  private retireMeshes(list: THREE.InstancedMesh[]): void {
+    for (const im of list) {
+      const life = im.geometry.getAttribute('aLife') as THREE.InstancedBufferAttribute | undefined;
+      if (life) { for (let i = 0; i < life.count; i++) life.setY(i, this.time); life.needsUpdate = true; }
+      im.material = this.veg.fadingTwin(im.material as THREE.Material);
+      this.fading.push({ im, until: this.time + 0.85 });
+    }
+    list.length = 0;
+  }
+
+  private dropShadowMeshes(rec: ChunkRecord): void {
+    for (const sm of rec.shadowMeshes) { this.root.remove(sm); disposeInstanceGeometry(sm.geometry); sm.dispose(); }
+    rec.shadowMeshes.length = 0;
+  }
+
+  /** Current geomorph value of a chunk's mesh (1 when settled). */
+  private morphValue(rec: ChunkRecord): number {
+    const m = rec.morph;
+    if (!m) return 1;
+    return m.from + (m.to - m.from) * smoothstep01((this.time - m.start) / MORPH_SECONDS);
+  }
+
+  /** Start (or redirect) the geomorph of a chunk's mesh toward `to`; the mesh gets a material twin with its own uMorph. */
+  private startMorph(rec: ChunkRecord, from: number, to: number): void {
+    if (!rec.mesh) return;
+    if (!rec.morph) {
+      const material = (this.terrainMaterial as TerrainMaterial).morphTwin();
+      rec.mesh.material = material;
+      rec.morph = { start: this.time, from, to, material };
+    } else {
+      rec.morph.from = from; rec.morph.to = to; rec.morph.start = this.time;
+    }
+    rec.morph.material.morphUniform.value = from;
+    this.morphing.add(rec);
+  }
+
+  private endMorph(rec: ChunkRecord): void {
+    if (!rec.morph) return;
+    if (rec.mesh && rec.mesh.material === rec.morph.material) rec.mesh.material = this.terrainMaterial;
+    rec.morph.material.dispose();
+    rec.morph = null;
+    this.morphing.delete(rec);
+  }
+
+  /** Advance every geomorph; finish settled ones and perform the swaps that waited for a morph-down. */
+  private stepMorphs(): void {
+    if (this.morphing.size === 0) return;
+    for (const rec of Array.from(this.morphing)) {
+      const m = rec.morph;
+      if (!m || !rec.mesh) { this.morphing.delete(rec); continue; }
+      const t = (this.time - m.start) / MORPH_SECONDS;
+      m.material.morphUniform.value = this.morphValue(rec);
+      if (t < 1) continue;
+      if (m.to >= 1) { this.endMorph(rec); continue; }
+      // Morphed down onto the coarser surface: swap in the coarser build, unless the player turned
+      // back and this LOD is wanted again, in which case rise back to it.
+      const msg = rec.pendingSwap;
+      rec.pendingSwap = null;
+      if (msg && rec.wantedLod > rec.lod) {
+        this.endMorph(rec);
+        this.installChunkNow(rec, msg, null);
+        if (rec.wantedLod !== rec.lod) this.requestChunk(rec, rec.wantedLod, rec.ring);
+      } else {
+        this.startMorph(rec, 0, 1);
       }
-      im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
-      im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
-      finish(im);
     }
-    this.treeCount += n;
   }
 
   /**
@@ -556,22 +755,17 @@ export class ChunkManager {
    * instance); the terrain and water swap immediately, which is invisible.
    */
   private retireChunkObjects(rec: ChunkRecord): void {
-    if (rec.treeMeshes.length > 0 && this.time > 0) {
-      for (const im of rec.treeMeshes) {
-        const life = im.geometry.getAttribute('aLife') as THREE.InstancedBufferAttribute | undefined;
-        if (life) { for (let i = 0; i < life.count; i++) life.setY(i, this.time); life.needsUpdate = true; }
-        im.material = this.veg.fadingTwin(im.material as THREE.Material);
-        this.fading.push({ im, until: this.time + 0.85 });
-      }
-      this.treeCount -= rec.trees.length / TREE_STRIDE;
-      rec.treeMeshes.length = 0;
-      rec.trees = new Float32Array(0);
-      rec.heights = null;
+    if (this.time > 0) {
+      this.retireMeshes(rec.treeMeshes);
+      this.retireMeshes(rec.coverMeshes);
     }
     this.removeChunkObjects(rec);
   }
 
   private removeChunkObjects(rec: ChunkRecord): void {
+    this.endMorph(rec);
+    rec.pendingSwap = null;
+    this.revegQueue.delete(rec);
     if (rec.mesh) {
       this.root.remove(rec.mesh);
       this.triangleCount -= (rec.mesh.geometry.index?.count ?? 0) / 3;
@@ -583,17 +777,23 @@ export class ChunkManager {
       rec.water.geometry.dispose();
       rec.water = null;
     }
-    for (const im of rec.treeMeshes) {
-      this.root.remove(im);
-      // The per-mesh geometry only holds instance attributes plus references
-      // to shared buffers; disposing it frees the instance buffers.
-      disposeInstanceGeometry(im.geometry);
-      im.dispose();
+    for (const list of [rec.treeMeshes, rec.coverMeshes]) {
+      for (const im of list) {
+        this.root.remove(im);
+        // The per-mesh geometry only holds instance attributes plus references
+        // to shared buffers; disposing it frees the instance buffers.
+        disposeInstanceGeometry(im.geometry);
+        im.dispose();
+      }
+      list.length = 0;
     }
+    this.dropShadowMeshes(rec);
+    rec.pendingCover = null;
     this.treeCount -= rec.trees.length / TREE_STRIDE;
-    rec.treeMeshes.length = 0;
+    rec.vegRep = 'none';
     rec.trees = new Float32Array(0);
     rec.heights = null;
+    rec.parentHeights = null;
   }
 
   private disposeChunk(rec: ChunkRecord): void {
@@ -625,7 +825,14 @@ export class ChunkManager {
     const cx = Math.floor(gx / CHUNK_SIZE), cz = Math.floor(gz / CHUNK_SIZE);
     const rec = this.chunks.get(chunkKey(cx, cz));
     if (rec && rec.heights) {
-      return sampleHeightGrid(rec.heights, rec.segments, rec.spacing, gx - cx * CHUNK_SIZE, gz - cz * CHUNK_SIZE);
+      const lx = gx - cx * CHUNK_SIZE, lz = gz - cz * CHUNK_SIZE;
+      const h = sampleHeightGrid(rec.heights, rec.segments, rec.spacing, lx, lz);
+      // While the mesh geomorphs, collide with the blended surface the player actually sees.
+      if (rec.morph && rec.parentHeights) {
+        const m = this.morphValue(rec);
+        if (m < 0.999) return sampleHeightGrid(rec.parentHeights, rec.segments, rec.spacing, lx, lz) * (1 - m) + h * m;
+      }
+      return h;
     }
     return this.gen.heightAt(gx, gz);
   }
@@ -676,6 +883,9 @@ export class ChunkManager {
     for (const { im } of this.fading) { this.root.remove(im); disposeInstanceGeometry(im.geometry); im.dispose(); }
     this.fading.length = 0;
     this.settling.length = 0;
+    this.morphing.clear();
+    this.revegQueue.clear();
+    this.coverQueue.length = 0;
     for (const rec of Array.from(this.chunks.values())) this.disposeChunk(rec);
     for (const rec of Array.from(this.far.values())) this.disposeFar(rec);
     this.pool.dispose();
