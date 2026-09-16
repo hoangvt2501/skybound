@@ -52,6 +52,13 @@ export class CameraRig {
   /** World-space orbit angles (azimuth = compass direction from bird to camera). */
   private azimuth = Math.PI;
   private elevation = 0.24;
+  /**
+   * Where the drag has put the orbit; the displayed angles ease toward it over ~45 ms. Pointer
+   * events arrive at the mouse's rate (125-1000 Hz) and are batched per frame, so the raw per-frame
+   * delta alternates (2 px, 3 px, 2 px...) and a drag applied directly reads as a juddering turn.
+   */
+  private azimuthGoal = Math.PI;
+  private elevationGoal = 0.24;
   private idle = 0;
   private returning = false;
   private lookAheadBlend = 1;
@@ -119,8 +126,8 @@ export class CameraRig {
 
   /** Apply an explicit orbit (tests / captures). */
   setOrbit(azimuth: number, elevation: number, distance?: number): void {
-    this.azimuth = wrapAngle(azimuth);
-    this.elevation = THREE.MathUtils.clamp(elevation, ELEVATION_MIN, ELEVATION_MAX);
+    this.azimuth = this.azimuthGoal = wrapAngle(azimuth);
+    this.elevation = this.elevationGoal = THREE.MathUtils.clamp(elevation, ELEVATION_MIN, ELEVATION_MAX);
     if (distance !== undefined) this.distance = THREE.MathUtils.clamp(distance, CAMERA.minDistance, CAMERA.maxDistance);
     this.freeLook = true;
     this.returning = false;
@@ -157,11 +164,13 @@ export class CameraRig {
           this.azimuth = wrapAngle(bird.heading + Math.PI);
           this.elevation = presetElevation;
         }
+        this.azimuthGoal = this.azimuth;
+        this.elevationGoal = this.elevation;
       }
       this.freeLook = true;
       this.returning = false;
-      this.azimuth = wrapAngle(this.azimuth - input.orbitYaw);
-      this.elevation = THREE.MathUtils.clamp(this.elevation + input.orbitPitch, ELEVATION_MIN, ELEVATION_MAX);
+      this.azimuthGoal = wrapAngle(this.azimuthGoal - input.orbitYaw);
+      this.elevationGoal = THREE.MathUtils.clamp(this.elevationGoal + input.orbitPitch, ELEVATION_MIN, ELEVATION_MAX);
       this.idle = 0;
     } else if (!input.dragging) {
       this.idle += dt;
@@ -174,12 +183,17 @@ export class CameraRig {
     let targetAz = wrapAngle(bird.heading + Math.PI);
     let targetEl = presetElevation;
     if (this.freeLook && !this.returning) {
+      const k = approach(CAMERA.orbitEaseRate, dt);
+      this.azimuth = wrapAngle(this.azimuth + wrapAngle(this.azimuthGoal - this.azimuth) * k);
+      this.elevation += (this.elevationGoal - this.elevation) * k;
       targetAz = this.azimuth;
       targetEl = this.elevation;
     } else if (this.returning) {
       const k = approach(CAMERA.orbitReturnRate, dt);
       this.azimuth = wrapAngle(this.azimuth + wrapAngle(targetAz - this.azimuth) * k);
       this.elevation += (targetEl - this.elevation) * k;
+      this.azimuthGoal = this.azimuth;
+      this.elevationGoal = this.elevation;
       targetAz = this.azimuth;
       targetEl = this.elevation;
       if (Math.abs(wrapAngle(this.azimuth - (bird.heading + Math.PI))) < 0.02 && Math.abs(this.elevation - presetElevation) < 0.01) {
@@ -188,8 +202,8 @@ export class CameraRig {
       }
     } else {
       // Chase: keep the stored angles in sync so a later drag starts from here.
-      this.azimuth = targetAz;
-      this.elevation = targetEl;
+      this.azimuth = this.azimuthGoal = targetAz;
+      this.elevation = this.elevationGoal = targetEl;
     }
     // Look-ahead follows how far the orbit has been dragged from behind the bird, so the view changes
     // in step with the hand: a time-based fade made the first second of a drag feel stuck and then

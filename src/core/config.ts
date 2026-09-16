@@ -146,6 +146,8 @@ export const CAMERA = {
   minClearance: 2.2,
   orbitReturnDelay: 1.6,
   orbitReturnRate: 2.4,
+  /** Free-look angles ease toward the dragged goal at this rate (1/s): ~45 ms, three frames, smooths uneven per-frame mouse deltas. */
+  orbitEaseRate: 22,
   /** Free-look drag: radians of orbit per pixel at sensitivity 1 (0.2 and 0.17 degrees; were 0.006 / 0.005 rad). */
   mouseYawPerPixel: 0.0035,
   mousePitchPerPixel: 0.003,

@@ -300,6 +300,7 @@ test.describe('World map mouse handling', () => {
     await page.mouse.down();
     await page.mouse.move(vp.width / 2 + 200, vp.height / 2 + 40);
     await page.mouse.up();
+    await page.waitForTimeout(400); // the orbit eases toward the dragged goal over a few frames
     const before = await dbg(page);
     // Teleport 9 km east: the next simulation step rebases the origin.
     await page.evaluate(([x, z]) => window.skybound.debug().teleport(x, z), [before.x + 9000, before.z]);

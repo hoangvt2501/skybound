@@ -796,7 +796,10 @@ export class App {
     // window can step down decisively and a clean one can probe up in small steps.
     const step = missRatio > 0.45 ? 0.2 : missRatio > 0.25 ? 0.1 : 0.05;
     // Below 0.7 the picture turns to mush; a few missed refreshes are the better trade there.
-    if (missRatio > 0.12 && this.pixelRatio > MIN_RENDER_SCALE) {
+    // Held windows: step down at 6 % late frames and probe up only from a clean window (< 1 %), so the
+    // scale settles one notch below the edge instead of on it (at the edge, 3-5 % of frames took two
+    // refreshes, which reads as a jerk whenever the camera is held still on the bird).
+    if (missRatio > 0.06 && this.pixelRatio > MIN_RENDER_SCALE) {
       const probeFailed = this.wallTime - this.lastProbeUp < 6;
       if (probeFailed) {
         // The scale it came from was holding a moment ago: go straight back there, not further.
@@ -806,7 +809,7 @@ export class App {
         next = Math.max(MIN_RENDER_SCALE, this.pixelRatio - step);
       }
       this.lastTransientDrop = this.wallTime;
-    } else if (missRatio < 0.03 && this.pixelRatio < probeLimit && this.wallTime - this.lastDprDrop > 8 && this.wallTime - this.lastTransientDrop > 4) {
+    } else if (missRatio < 0.01 && this.pixelRatio < probeLimit && this.wallTime - this.lastDprDrop > 8 && this.wallTime - this.lastTransientDrop > 4) {
       this.preProbeScale = this.pixelRatio;
       next = Math.min(probeLimit, this.pixelRatio + 0.05);
       this.lastProbeUp = this.wallTime;
