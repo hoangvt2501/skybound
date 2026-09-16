@@ -149,6 +149,8 @@ export class App {
   /** Consecutive probes up that missed; each one doubles the wait before the ceiling is retried. */
   private probeFailures = 0;
   private settleUntil = -Infinity;
+  private shortMissed = 0;
+  private shortFrames = 0;
   private shadersWarm = false;
   /** Scene renders at `pixelRatio` into a scaled target and is upsampled onto the full-size canvas. */
   private frame = new ScaledFrame();
@@ -521,8 +523,8 @@ export class App {
     // at 20 ms so a slow stretch cannot pass for a slow display), then count frames that missed a
     // refresh. Displays faster than 60 Hz are held to 60: the target is smoothness, not 144 fps.
     if (dt > 1 / 250) this.refreshInterval = Math.min(Math.max(dt, 1 / 165), Math.min(1 / 50, this.refreshInterval * 1.001));
-    this.windowFrames++;
-    if (dt > Math.max(this.refreshInterval, 1 / 60) * 1.35) this.missedFrames++;
+    this.windowFrames++; this.shortFrames++;
+    if (dt > Math.max(this.refreshInterval, 1 / 60) * 1.35) { this.missedFrames++; this.shortMissed++; }
     if (this.frameLog.length < 4000) this.frameLog.push(dt * 1000);
     this.fpsCounter.frames++;
     this.fpsCounter.time += dt;
@@ -757,7 +759,22 @@ export class App {
     if (!this.settings.dynamicResolution || (this.phase !== 'flying' && this.phase !== 'start')) { this.missedFrames = 0; this.windowFrames = 0; return; }
     // The frames right after a scale change include the target reallocation itself; they say nothing
     // about the new scale, so they are not counted.
-    if (this.wallTime < this.settleUntil) { this.missedFrames = 0; this.windowFrames = 0; return; }
+    if (this.wallTime < this.settleUntil) { this.missedFrames = 0; this.windowFrames = 0; this.shortMissed = 0; this.shortFrames = 0; return; }
+    // A sudden run of misses (the view swung round to a heavier direction) steps down right away
+    // instead of waiting a full window: half of the last 20 frames late is not noise.
+    if (this.shortFrames >= 20) {
+      const burst = this.shortMissed / this.shortFrames;
+      this.shortMissed = 0; this.shortFrames = 0;
+      if (burst >= 0.5 && this.pixelRatio > MIN_RENDER_SCALE && this.wallTime - this.lastDprAdjust > 0.5) {
+        this.pixelRatio = Math.max(MIN_RENDER_SCALE, this.pixelRatio - 0.1);
+        this.lastTransientDrop = this.wallTime;
+        this.applyRenderScale();
+        this.lastDprAdjust = this.wallTime;
+        this.settleUntil = this.wallTime + 0.6;
+        this.missedFrames = 0; this.windowFrames = 0;
+        return;
+      }
+    }
     if (this.wallTime - this.lastDprAdjust < 1.5 || this.windowFrames < 60) return;
     const missRatio = this.missedFrames / this.windowFrames;
     this.missedFrames = 0; this.windowFrames = 0;

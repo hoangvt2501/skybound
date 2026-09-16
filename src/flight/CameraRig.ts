@@ -191,11 +191,12 @@ export class CameraRig {
       this.azimuth = targetAz;
       this.elevation = targetEl;
     }
-    // Look-ahead fades out while in free-look so the bird stays in frame. The fade out is slow
-    // (about two seconds): a fast one read as the camera swinging toward the bird by itself right
-    // after a drag began. Coming back to chase it returns quickly.
-    const lookAheadTarget = this.freeLook ? 0 : 1;
-    this.lookAheadBlend += (lookAheadTarget - this.lookAheadBlend) * approach(this.freeLook ? 1.5 : 4, dt);
+    // Look-ahead follows how far the orbit has been dragged from behind the bird, so the view changes
+    // in step with the hand: a time-based fade made the first second of a drag feel stuck and then
+    // swung the view by itself. Behind the bird (chase, or a drag that stays near it) it is full.
+    const deviation = Math.abs(wrapAngle(targetAz - (bird.heading + Math.PI)));
+    const lookAheadTarget = this.freeLook ? 1 - THREE.MathUtils.smoothstep(deviation, 0.12, 0.75) : 1;
+    this.lookAheadBlend += (lookAheadTarget - this.lookAheadBlend) * approach(12, dt);
 
     // Desired camera position in global space (spherical around the pivot).
     const dist = this.mode === 'chase' ? this.distance : this.distance * (CAMERA.cinematic.distance / CAMERA.chase.distance);
@@ -238,10 +239,11 @@ export class CameraRig {
       this.effectiveDistance = allowed;
       this.initialized = true;
     } else {
-      // Position follows tightly in free-look (the orbit is the user's) and
-      // with a little lag in chase; the look target is always smoothed.
-      const kp = approach(this.freeLook ? 18 : CAMERA.positionSmoothing, dt);
-      const kl = approach(CAMERA.lookSmoothing, dt);
+      // Position follows almost rigidly in free-look (the orbit is the user's, and any lag behind the
+      // bird turns a long frame into a visible catch-up jerk) and with a little lag in chase; the look
+      // target is smoothed, less so in free-look.
+      const kp = approach(this.freeLook ? 40 : CAMERA.positionSmoothing, dt);
+      const kl = approach(this.freeLook ? 16 : CAMERA.lookSmoothing, dt);
       _pos.set(camX, camY, camZ);
       _look.set(lookX, lookY, lookZ);
       this.smoothed.lerp(_pos, kp);

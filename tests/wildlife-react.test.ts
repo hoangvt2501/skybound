@@ -59,13 +59,24 @@ describe('wildlife reactions: planning', () => {
   it('keeps ducks on the water across their whole width and gives up on the shore', () => {
     const pond = find((x, z, h) => h < -2 && [0, 0.7, -0.7].every((a) => [4, 8, 12].every((d) => [-5.5, 0, 5.5].every((lane) => gen.heightAt(x + Math.cos(a) * d - Math.sin(a) * lane, z + Math.sin(a) * d + Math.cos(a) * lane) < -0.5))));
     const duck: Encounter = { kind: 'duck', x: pond.x, z: pond.z, y: pond.h, phase: 1, count: 3, radius: 3 };
-    const r = wildlife.planReaction(duck, { x: pond.x - 20, z: pond.z }, 5, 1)!;
+    const r = wildlife.planReaction(duck, { x: pond.x - 20, z: pond.z }, 5, 0.7)!;
     expect(r.mode).toBe(3);
+    expect(r.dist).toBeLessThan(REACT.duck.skitterDist);
     expect(gen.heightAt(duck.x + r.dirX * r.dist, duck.z + r.dirZ * r.dist)).toBeLessThan(-0.5);
     // A pond just wide enough for the center line but not for the outer lane: rejected in that direction.
-    const channel: WildlifeTerrain = { ...flat(-3), heightAt: (_x, z) => (Math.abs(z) < 4 ? -3 : 1) };
+    const channel: WildlifeTerrain = { ...flat(-3), heightAt: (_x, z) => (Math.abs(z) < 3 ? -3 : 1) };
     const e: Encounter = { kind: 'duck', x: 0, z: 0, y: -3, phase: 0, count: 3, radius: 3 };
-    expect(new Wildlife(gen, channel).planReaction(e, { x: -20, z: 0 }, 0, 1)).toBeNull();
+    expect(new Wildlife(gen, channel).planReaction(e, { x: -20, z: 0 }, 0, 0.7)).toBeNull();
+    // Dived at (threat at the skitter level) on open water: a longer, faster flutter-run.
+    const sk = new Wildlife(gen, flat(-4)).planReaction(e, { x: -20, z: 0 }, 0, 0.95)!;
+    expect(sk.dist).toBe(REACT.duck.skitterDist);
+    expect(sk.seconds).toBe(REACT.duck.skitterSeconds);
+    expect(sk.intensity).toBeGreaterThanOrEqual(REACT.duck.skitterAbove);
+    // Ducks paddle in a line on one circle, each trailing the one ahead.
+    const o0 = memberOrbit(e, 0), o1 = memberOrbit(e, 1), o2 = memberOrbit(e, 2);
+    expect(o1.radius).toBe(o0.radius); expect(o2.radius).toBe(o0.radius);
+    expect(o1.angle0).toBeLessThan(o0.angle0); expect(o2.angle0).toBeLessThan(o1.angle0);
+    expect(o1.bob).toBe(0);
     const dry = find((x, z, h) => h > 8 && [0, 0.7, -0.7, 1.4, -1.4, Math.PI].every((a) => gen.heightAt(x + Math.cos(a) * 9, z + Math.sin(a) * 9) > 2));
     expect(wildlife.planReaction({ kind: 'duck', x: dry.x, z: dry.z, y: dry.h, phase: 0, count: 3, radius: 3 }, { x: dry.x - 20, z: dry.z }, 5, 1)).toBeNull();
   });
@@ -165,6 +176,17 @@ describe('wildlife reactions: threat and states', () => {
 });
 
 describe('wildlife reactions: fish and ducks', () => {
+  it('keeps shoals away from duck groups, never within 60 m of each other', () => {
+    // Populate the wetland around the spawn (many ponds) and look at every duck / fish pair.
+    const w = new Wildlife(gen, analytic);
+    for (let i = 0; i < 200; i++) w.update(i / 60, observer(-4740, 120, 7165, 0, 0, 0), 0, 0, 'lively', 'high');
+    const groups = w.groupsNear(-4740, 7165, 2000);
+    const ducks = groups.filter((g) => g.kind === 'duck'), fish = groups.filter((g) => g.kind === 'fish');
+    expect(ducks.length).toBeGreaterThan(0);
+    let nearest = Infinity;
+    for (const d of ducks) for (const f of fish) nearest = Math.min(nearest, Math.hypot(d.x - f.x, d.z - f.z));
+    expect(nearest).toBeGreaterThan(60);
+  });
   it('dives only the nearest shoals on water contact, once, and mutes their splashes meanwhile', () => {
     const w = new Wildlife(gen, flat(-5));
     const map = (w as unknown as { encounters: Map<string, Encounter> }).encounters;

@@ -455,6 +455,7 @@ export class ChunkManager {
       mesh.updateMatrix();
       mesh.matrixAutoUpdate = false;
       mesh.renderOrder = -1;
+      ChunkManager.warmFirstDraw(mesh);
       this.root.add(mesh);
       rec.mesh = mesh;
       this.triangleCount += msg.indices.length / 3;
@@ -503,6 +504,7 @@ export class ChunkManager {
     mesh.updateMatrix();
     mesh.matrixAutoUpdate = false;
     mesh.receiveShadow = this.shadows;
+    ChunkManager.warmFirstDraw(mesh);
     this.root.add(mesh);
     rec.mesh = mesh;
     rec.lod = msg.lod;
@@ -523,6 +525,7 @@ export class ChunkManager {
       water.updateMatrix();
       water.matrixAutoUpdate = false;
       water.renderOrder = 2;
+      ChunkManager.warmFirstDraw(water);
       this.root.add(water);
       rec.water = water;
     }
@@ -538,6 +541,17 @@ export class ChunkManager {
   }
 
   /** Birth bookkeeping shared by every instanced vegetation mesh: dissolve in over 0.7 s, settle, chunk placement. */
+  /**
+   * Draw a new mesh once even while it is outside the view: three uploads its buffers on the first
+   * draw, and a mesh installed behind the bird would otherwise pay that upload in the frame the camera
+   * swings round to it (a 180-degree drag used to draw about 400 meshes for the first time within a
+   * second, with a run of 33 ms frames). One off-screen draw costs its vertex work only.
+   */
+  private static warmFirstDraw(obj: THREE.Object3D): void {
+    obj.frustumCulled = false;
+    obj.onAfterRender = () => { obj.frustumCulled = true; obj.onAfterRender = () => {}; };
+  }
+
   private placeInstanced(rec: ChunkRecord, im: THREE.InstancedMesh, list: THREE.InstancedMesh[]): void {
     const life = new Float32Array(im.count * 2);
     for (let i = 0; i < im.count; i++) { life[i * 2] = this.time; life[i * 2 + 1] = 1e9; }
@@ -548,6 +562,7 @@ export class ChunkManager {
     im.position.set(rec.cx * CHUNK_SIZE, 0, rec.cz * CHUNK_SIZE);
     im.updateMatrix();
     im.matrixAutoUpdate = false;
+    ChunkManager.warmFirstDraw(im);
     this.root.add(im);
     list.push(im);
   }
@@ -622,6 +637,7 @@ export class ChunkManager {
         shadow.position.set(ox, 0, oz);
         shadow.updateMatrix();
         shadow.matrixAutoUpdate = false;
+        ChunkManager.warmFirstDraw(shadow);
         this.root.add(shadow);
         rec.shadowMeshes.push(shadow);
       }

@@ -49,6 +49,8 @@ export interface Encounter {
   /** Alert head-turn: start time while alert (> 0), minus the end time while easing back, 0 otherwise; direction toward the player. */
   alertAt?: number; alertX?: number; alertZ?: number;
   react?: Reaction | null; cooldownUntil?: number;
+  /** Last wake-ring tick of a paddling duck group. */
+  wakeTick?: number;
 }
 /** Who the player is, for the threat estimate: position, velocity (m/s) and boost. */
 export interface Observer { x: number; y: number; z: number; vx: number; vy: number; vz: number; boosting: boolean }
@@ -61,7 +63,7 @@ export interface Observer { x: number; y: number; z: number; vx: number; vy: num
 export const REACT = {
   bird: { radius: 110, height: 60, minDist: 10, maxDist: 24, seconds: 3.4, hold: 0, cooldown: 10 },
   deer: { radius: 95, height: 60, minDist: 14, maxDist: 26, seconds: 2.8, hold: 2.5, cooldown: 12 },
-  duck: { radius: 80, height: 45, minDist: 6, maxDist: 11, seconds: 2.6, hold: 2.5, cooldown: 12 },
+  duck: { radius: 80, height: 45, minDist: 6, maxDist: 11, seconds: 2.6, hold: 2.5, cooldown: 12, skitterAbove: 0.85, skitterDist: 16, skitterSeconds: 1.8, wakeSeconds: 1.8, wakeRange: 160 },
   fish: { radius: 36, seconds: 5, cooldown: 8 },
   /**
    * State thresholds on the smoothed threat (enter above, leave below: hysteresis). At cruise speed
@@ -99,7 +101,8 @@ const _matrix = new THREE.Matrix4(), _position = new THREE.Vector3(), _scale = n
 /** Per-member orbit parameters exactly as `rebuild` writes them into aOrbit / aPhase. */
 export function memberOrbit(e: Encounter, j: number): { radius: number; speed: number; angle0: number; bob: number; y: number; phase: number } {
   if (e.kind === 'bird') return { radius: e.radius + j * 6, speed: 0.08, angle0: e.phase - j * 0.03, bob: 1.5, y: e.y + j * 0.6, phase: e.phase + j };
-  if (e.kind === 'duck') return { radius: 3 + j, speed: 0.045, angle0: e.phase + j * 0.8, bob: 0, y: 0.015, phase: e.phase + j };
+  // Ducks paddle in a line: one circle, each member trailing the one ahead by about 1.5 m of arc.
+  if (e.kind === 'duck') return { radius: 3.5, speed: 0.045, angle0: e.phase - j * 0.42, bob: 0, y: 0.015, phase: e.phase + j };
   return { radius: 0, speed: 0, angle0: Math.PI - e.phase, bob: 0, y: e.y, phase: e.phase + j };
 }
 
@@ -227,8 +230,13 @@ function geometry(kind: Kind): THREE.BufferGeometry {
     ellipsoid(0, 1.45, -0.91, 0.1, 0.09, 0.07, 0x45372c, 2);
     for (const side of [-1, 1]) {
       ellipsoid(side * 0.17, 1.78, -0.58, 0.08, 0.19, 0.05, 0xb09876, 2);
-      // Legs carry aMotion 7: they swing from the hip while the deer runs.
-      for (const z of [-0.36, 0.37]) ellipsoid(side * 0.18, 0.45, z, 0.055, 0.47, 0.06, 0x695445, 7);
+      // Legs in two segments: the thigh (aMotion 7) swings from the hip at y 0.92, the shin and hoof
+      // (aMotion 8) fold at the knee at y 0.52 while the deer runs; diagonal pairs move together.
+      for (const z of [-0.36, 0.37]) {
+        ellipsoid(side * 0.18, 0.72, z, 0.065, 0.22, 0.075, 0x6f5947, 7);
+        ellipsoid(side * 0.18, 0.29, z, 0.05, 0.25, 0.055, 0x695445, 8);
+        ellipsoid(side * 0.18, 0.05, z + 0.01, 0.06, 0.05, 0.07, 0x3a2f27, 8);
+      }
     }
     ellipsoid(0, 1.1, 0.62, 0.09, 0.11, 0.18, 0xe4d6b9, 2);
   } else {
@@ -236,7 +244,11 @@ function geometry(kind: Kind): THREE.BufferGeometry {
     ellipsoid(0, 0.4, -0.22, 0.1, 0.16, 0.11, 0x466555, 2);
     ellipsoid(0, 0.53, -0.28, 0.13, 0.12, 0.14, 0x3b6b51, 2);
     ellipsoid(0, 0.49, -0.44, 0.11, 0.03, 0.1, 0xd9b55a, 2);
-    for (const side of [-1, 1]) ellipsoid(side * 0.18, 0.21, 0.04, 0.06, 0.11, 0.23, 0x625c56);
+    for (const side of [-1, 1]) {
+      ellipsoid(side * 0.18, 0.21, 0.04, 0.06, 0.11, 0.23, 0x625c56);
+      // Wings (aMotion 9): folded along the body, beating only when the duck skitters across the water.
+      ellipsoid(side * 0.2, 0.3, 0.02, 0.22, 0.03, 0.17, 0x8a7a63, 9);
+    }
   }
   const merged = mergeGeometries(parts, false)!;
   for (const part of parts) part.dispose();
@@ -324,7 +336,7 @@ export class Wildlife {
       shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
         float wildAngle = aOrbit.z + uWildTime * aOrbit.y;
         // Local -Z forward follows the circle tangent; leaping fish (aMotion 6) keep a fixed heading.
-        float wildHeading = aMotion > 5.5 ? PI - aOrbit.z : PI - wildAngle;
+        float wildHeading = (aMotion > 5.5 && aMotion < 6.5) ? PI - aOrbit.z : PI - wildAngle;
         // Reaction state: rt = seconds since it started, mode 1 flock, 2 run, 3 swim, 4 dive.
         float reactMode = floor(aReact.w);
         float reactT = uWildTime - aReact.x;
@@ -376,17 +388,32 @@ export class Wildlife {
             p = vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
             transformed = p + pivot + vec3(0.0, 0.08 * alertOn, 0.0);
           }
-        } else if (aMotion > 6.5 && aMotion < 7.5) {
-          // Deer legs: diagonal pairs swing from the hip while running.
+        } else if (aMotion > 6.5 && aMotion < 8.5) {
+          // Deer legs: diagonal pairs swing from the hip while running; the shin folds at the knee on the
+          // forward swing and the hoof follows it (a gallop read from the side, not a rocking block).
           if (runSpeed > 0.02) {
             float pair = sign(position.x) * sign(position.z);
-            float swing = 0.55 * runSpeed * sin((reactT - runDelay) * 11.0 + (pair > 0.0 ? 0.0 : PI));
-            float hipZ = sign(position.z) * 0.365;
-            vec3 p = transformed - vec3(0.0, 0.9, hipZ);
+            float phi = (reactT - runDelay) * 11.0 + (pair > 0.0 ? 0.0 : PI);
+            float swing = 0.7 * runSpeed * sin(phi);
+            float bend = -0.95 * runSpeed * max(0.0, sin(phi + 0.6));
+            float legZ = sign(position.z) * 0.365;
+            if (aMotion > 7.5) {
+              vec3 knee = vec3(0.0, 0.52, legZ);
+              vec3 q = transformed - knee;
+              float cb = cos(bend), sb = sin(bend);
+              transformed = vec3(q.x, cb * q.y - sb * q.z, sb * q.y + cb * q.z) + knee;
+            }
+            vec3 hip = vec3(0.0, 0.92, legZ);
+            vec3 p = transformed - hip;
             float c = cos(swing), s = sin(swing);
-            p = vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
-            transformed = p + vec3(0.0, 0.9, hipZ);
+            transformed = vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z) + hip;
           }
+        } else if (aMotion > 8.5 && aMotion < 9.5) {
+          // Duck wings: folded (shortened) unless the duck skitters across the water, then a fast beat.
+          float skitter = (runSpeed > 0.02 && reactMode > 2.5 && reactMode < 3.5 && aReact2.x > 0.85) ? 1.0 : 0.0;
+          float beat = sin(uWildTime * 16.0 + aPhase);
+          transformed.x *= mix(0.55, 1.0, skitter);
+          transformed.y += abs(position.x) * beat * 0.5 * skitter;
         } else if (aMotion > 2.5 && aMotion < 3.5) {
           transformed.y += sin(uWildTime * 0.9 + aPhase) * 0.22; // sailboat heave
           transformed.x += position.y * sin(uWildTime * 0.7 + aPhase) * 0.06; // and a little roll
@@ -395,7 +422,7 @@ export class Wildlife {
         }
         vec3 wildCenter = (modelMatrix * instanceMatrix)[3].xyz;
         float wildFade = 1.0 - smoothstep(uMaxDistance * 0.8, uMaxDistance, distance(cameraPosition, wildCenter));
-        if (aMotion > 5.5) {
+        if (aMotion > 5.5 && aMotion < 6.5) {
           // Leaping fish (aOrbit: leap length, cycle rate, heading, leap height). For the first third of
           // each cycle it dashes forward in a parabola, pitching along the arc; the rest it waits 1.4 m down.
           // A dive (mode 4) keeps it under and drifts it away from the splash for a few seconds.
@@ -415,8 +442,10 @@ export class Wildlife {
           transformed += vec3(aReact.y, 0.0, aReact.z) * (3.0 * dive * (0.6 + 0.8 * wildVigor(aPhase)));
         } else {
           if (runSpeed > 0.02) {
-            // Gallop / paddle bob while moving, in step with the legs.
+            // Gallop / paddle bob while moving, in step with the legs; a skittering duck rides higher.
             transformed.y += abs(sin((reactT - runDelay) * 11.0)) * (reactMode < 2.5 ? 0.1 : 0.04) * runSpeed;
+            if (reactMode > 2.5 && reactMode < 3.5 && aReact2.x > 0.85) transformed.y += 0.14 * runSpeed;
+            if (reactMode < 2.5 && aMotion > 1.5 && aMotion < 2.5) transformed.y -= 0.1 * runSpeed; // head down at a gallop
           }
           transformed = wildRotate(transformed * wildFade, wildHeading);
           transformed += vec3(cos(wildAngle) * aOrbit.x, aOrbit.w * sin(uWildTime * 0.4 + aPhase), sin(wildAngle) * aOrbit.x);
@@ -444,7 +473,7 @@ export class Wildlife {
           }
         }`);
     };
-    material.customProgramCacheKey = () => 'skybound-wildlife-v6';
+    material.customProgramCacheKey = () => 'skybound-wildlife-v7';
     this.materials.push(material);
     const ring: THREE.InstancedMesh[] = [];
     for (let slot = 0; slot < RING; slot++) {
@@ -487,21 +516,33 @@ export class Wildlife {
       return { kind: 'bird', x: fx, z: fz, y: y + 75 + rng.next() * 80 + lift, phase: rng.next() * Math.PI * 2, radius, count: 4 + rng.int(4) };
     }
     // Water at least 2.5 m deep: open water may hold a sailboat (one deep cell in six, 80 m of clear
-    // water around its circle); otherwise most cells hold a small shoal of leaping fish.
+    // water around its circle); otherwise a small shoal of leaping fish, but never next to ducks: a
+    // shoal is placed only if none of the eight neighbouring cells would hold a duck habitat (their
+    // candidates are replayed from their own RNG, so the rule holds whichever cell is prepared first).
     if (s.height < -2.5) {
       if (s.height < -6 && rng.next() < 0.18) {
         let open = true;
         for (let i = 0; i < 8 && open; i++) if (this.gen.heightAt(x + Math.cos(i * Math.PI / 4) * 80, z + Math.sin(i * Math.PI / 4) * 80) > -3) open = false;
         if (open) return { kind: 'boat', x, z, y: 0, phase: rng.next() * Math.PI * 2, radius: 45, count: 1 };
       }
-      if (rng.next() < 0.7) return { kind: 'fish', x, z, y: 0, phase: rng.next() * Math.PI * 2, radius: 4 + rng.next() * 3, count: 3 + rng.int(3) };
+      if (s.height < -3 && rng.next() < 0.7) {
+        let open = true; // open water 12 m around: shoals sit in the middle of ponds and lakes
+        for (let i = 0; i < 8 && open; i++) if (this.gen.heightAt(x + Math.cos(i * Math.PI / 4) * 12, z + Math.sin(i * Math.PI / 4) * 12) > -2) open = false;
+        if (open && !this.ducksAround(cx, cz)) return { kind: 'fish', x, z, y: 0, phase: rng.next() * Math.PI * 2, radius: 4 + rng.next() * 3, count: 3 + rng.int(3) };
+      }
       return null;
     }
-    // Ponds cover only a few percent of a wetland cell, so a single random
-    // point almost never lands on water and ducks would be a rarity. Try a few
-    // candidates per cell and prefer the first one that sits on a pond; the
-    // first suitable meadow point is the fallback, so deer density elsewhere
-    // is unchanged. The cell RNG keeps every candidate deterministic per seed.
+    return this.groundHabitat(cx, cz, rng, x, z, s);
+  }
+
+  /**
+   * Duck pond or deer meadow of a ground cell. Ponds cover only a few percent of a wetland cell, so a
+   * single random point almost never lands on water and ducks would be a rarity: try a few candidates
+   * per cell and prefer the first one that sits on a pond; the first suitable meadow point is the
+   * fallback, so deer density elsewhere is unchanged. The cell RNG keeps every candidate deterministic.
+   */
+  private groundHabitat(cx: number, cz: number, rng: Rng, x: number, z: number, s: ReturnType<typeof createTerrainSample>): Encounter | null {
+    const size = 180;
     let land: { x: number; z: number; y: number } | null = null;
     for (let attempt = 0; attempt < GROUND_CANDIDATES; attempt++) {
       const px = attempt === 0 ? x : (cx + 0.18 + rng.next() * 0.64) * size;
@@ -516,6 +557,20 @@ export class Wildlife {
       } else if (habitat === 'deer' && !land) land = { x: px, z: pz, y: sample.height };
     }
     return land ? { kind: 'deer', x: land.x, z: land.z, y: land.y, radius: 0, phase: rng.next() * Math.PI * 2, count: 2 } : null;
+  }
+
+  /** Would any of the eight cells around (cx, cz) hold a duck habitat? Replays their candidate draws without storing anything. */
+  private ducksAround(cx: number, cz: number): boolean {
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dz === 0) continue;
+      const ncx = cx + dx, ncz = cz + dz;
+      const rng = new Rng(hash2(ncx, ncz, this.gen.seed ^ 0xdeea));
+      const x = (ncx + 0.18 + rng.next() * 0.64) * 180, z = (ncz + 0.18 + rng.next() * 0.64) * 180;
+      const s = this.gen.sample(x, z, this.sample);
+      if (s.height < -2.5) continue; // a water-first cell holds fish or a boat, never ducks
+      if (this.groundHabitat(ncx, ncz, rng, x, z, s)?.kind === 'duck') return true;
+    }
+    return false;
   }
 
   update(time: number, observer: Observer, ox: number, oz: number, mode: WildlifeMode, quality: QualityPreset): void {
@@ -609,7 +664,7 @@ export class Wildlife {
         const alertT = e.alertAt ?? 0;
         if (r) {
           if (r.mode === 1) react2.setXYZW(index, r.dist * r.intensity, r.seconds, 0, e.radius);
-          else react2.setXYZW(index, 1, r.seconds, 0, r.dist);
+          else react2.setXYZW(index, Math.max(0.05, r.intensity), r.seconds, 0, r.dist);
         } else if (alertT !== 0) {
           react2.setXYZW(index, e.alertZ ?? 0, 3, alertT, e.alertX ?? 0);
         } else {
@@ -638,6 +693,12 @@ export class Wildlife {
       if (d < best) { best = d; bx = p.x; by = p.y; bz = p.z; }
     }
     if (best === Infinity) return { threat: 0, dist: Infinity, towardX: 0, towardZ: 0 };
+    if (e.kind === 'bird') {
+      // A flock is a ring 130-300 m across: a bird flying through its disc is among the flock even
+      // when every member happens to be on the far side, so the ring itself counts as a target.
+      const dh = Math.hypot(e.x - o.x, e.z - o.z), ring = Math.hypot(Math.max(0, dh - e.radius), o.y - e.y);
+      if (ring < best) { best = ring; const k = dh > 1e-3 ? Math.min(1, e.radius / dh) : 0; bx = o.x + (e.x - o.x) * (1 - k); bz = o.z + (e.z - o.z) * (1 - k); by = e.y; }
+    }
     const tx = (bx - o.x) / best, ty = (by - o.y) / best, tz = (bz - o.z) / best;
     const closing = o.vx * tx + o.vy * ty + o.vz * tz; // m/s toward the animal
     const speed = Math.hypot(o.vx, o.vy, o.vz);
@@ -685,9 +746,20 @@ export class Wildlife {
       const threat = e.threat;
       const state = e.state ?? 'idle';
       const since = time - (e.stateSince ?? -Infinity);
-      // Ducks swimming away leave a short ripple trail (budgeted; the ring pool is small).
-      if (e.react && e.kind === 'duck' && time - e.react.start < REACT.rippleSeconds && this.onDuckRipple) {
-        for (let j = 0; j < e.count && ripples < REACT.rippleBudget; j++) { const p = memberPosition(e, j, time); this.onDuckRipple(p.x, p.z, 0.4); ripples++; }
+      // Ducks swimming away leave a short ripple trail (budgeted; the ring pool is small); a skitter
+      // throws bigger rings. Paddling ducks near the player leave a small wake ring every 1.8 s each.
+      if (e.kind === 'duck' && this.onDuckRipple) {
+        if (e.react && time - e.react.start < REACT.rippleSeconds) {
+          const size = e.react.intensity >= REACT.duck.skitterAbove ? 0.65 : 0.4;
+          for (let j = 0; j < e.count && ripples < REACT.rippleBudget; j++) { const p = memberPosition(e, j, time); this.onDuckRipple(p.x, p.z, size); ripples++; }
+        } else if (!e.react && t.dist < REACT.duck.wakeRange) {
+          const tick = Math.floor(time / REACT.duck.wakeSeconds);
+          if (tick !== (e.wakeTick ?? -1)) {
+            e.wakeTick = tick;
+            const j = tick % e.count; // one member per tick, so a group of three wakes every 0.6 s on average
+            if (ripples < REACT.rippleBudget) { const p = memberPosition(e, j, time); this.onDuckRipple(p.x, p.z, 0.22); ripples++; }
+          }
+        }
       }
       if (e.react) continue; // the GPU is playing the evade; the state advances when it expires
       const evadeAllowed = active < REACT.maxActive[tier] && time >= (e.cooldownUntil ?? -Infinity);
@@ -740,13 +812,17 @@ export class Wildlife {
       return { start: time, dirX: ax, dirZ: az, mode: 1, dist: amplitude, dh: 0, seconds: tune.seconds, intensity: 1, until: time + tune.seconds + 0.5 };
     }
     const tune = e.kind === 'deer' ? REACT.deer : REACT.duck;
-    const dist = tune.minDist + (tune.maxDist - tune.minDist) * intensity;
-    const halfWidth = e.kind === 'deer' ? 2.8 : 5.5; // group spread plus body
+    // A duck that is dived at (threat above the skitter level) flutter-runs across the water instead
+    // of paddling off: farther and faster, wings beating (the shader reads the intensity).
+    const skitter = e.kind === 'duck' && intensity >= REACT.duck.skitterAbove;
+    const dist = skitter ? REACT.duck.skitterDist : tune.minDist + (tune.maxDist - tune.minDist) * intensity;
+    const seconds = skitter ? REACT.duck.skitterSeconds : tune.seconds;
+    const halfWidth = e.kind === 'deer' ? 2.8 : 4.5; // group spread plus body
     for (const a of [0, 0.7, -0.7, 1.4, -1.4, Math.PI]) {
       const c = Math.cos(a), s = Math.sin(a);
       const dx = ax * c - az * s, dz = ax * s + az * c;
       const corridor = this.corridorUsable(e, dx, dz, dist, halfWidth);
-      if (corridor !== null) return { start: time, dirX: dx, dirZ: dz, mode: e.kind === 'deer' ? 2 : 3, dist, dh: corridor, seconds: tune.seconds, intensity, until: time + tune.seconds + 0.4 + tune.hold };
+      if (corridor !== null) return { start: time, dirX: dx, dirZ: dz, mode: e.kind === 'deer' ? 2 : 3, dist, dh: corridor, seconds, intensity, until: time + seconds + 0.4 + tune.hold };
     }
     return null;
   }
@@ -801,8 +877,11 @@ export class Wildlife {
       e.react = { start: time, dirX: ax, dirZ: az, mode: 4, dist: 3, dh: 0, seconds, intensity: 1, until: time + seconds };
       e.state = 'evade'; e.stateSince = time; e.cooldownUntil = time + seconds + REACT.fish.cooldown;
       this.dirty = true; this.builtAt = -Infinity;
+      this.onFishSplash?.(e.x, e.z, false); // the shoal breaks the surface as it turns down
     }
   }
+
+
 
   /** Groups currently reacting or alert, by kind (diagnostics and tests). */
   reactions(): { kind: Kind; state: BehaviourState; mode: number; x: number; z: number; until: number; threat: number }[] {
