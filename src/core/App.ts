@@ -11,7 +11,7 @@ import { Sky } from '../atmosphere/Sky';
 import { WaterMaterial } from '../atmosphere/WaterMaterial';
 import { Autopilot } from '../flight/Autopilot';
 import { BIRD_SPECIES } from '../flight/BirdSpecies';
-import { Wildlife } from '../world/Wildlife';
+import { Wildlife, type Observer } from '../world/Wildlife';
 import { BirdModel } from '../flight/Bird';
 import { renderBirdPortraits } from '../ui/BirdPortraits';
 import { PhotoPanel } from '../ui/PhotoPanel';
@@ -104,6 +104,9 @@ export class App {
   /** Diagnostic switches (debug hooks) for same-session cost attribution. */
   private diag = { mist: true, lookahead: true };
   private lastSkimRing = 0;
+  private lastSkimContact = 0;
+  /** Player position, velocity and boost as the wildlife sees them (reused every frame). */
+  private wildlifeObserver: Observer = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, boosting: false };
   private sun: THREE.DirectionalLight;
   private hemi: THREE.HemisphereLight;
   private fog: THREE.Fog;
@@ -231,6 +234,7 @@ export class App {
       const s = this.flight.state, dir = Math.sin(s.heading), dirZ = -Math.cos(s.heading);
       const strength = Math.min(1, 0.25 + speed / 70 * 0.5 + steepness * 0.6);
       this.splash.splash(s.x, s.z, strength, dir, dirZ, speed);
+      this.wildlife.onWaterContact(s.x, s.z, strength, this.simTime);
       this.audio.splash(strength);
       this.cameraRig.addShake(0.15 + strength * 0.4);
       this.hud.toast(steepness > 0.45 ? 'Splash! Pull up.' : 'Skimming the water.', 'warn', 1400);
@@ -240,10 +244,14 @@ export class App {
     this.bird = new BirdModel(this.settings.birdSpecies);
     this.bird.group.scale.setScalar(1.6);
     this.scene.add(this.bird.group);
-    this.wildlife = new Wildlife(this.gen, (x, z) => this.chunks.surfaceAt(x, z));
+    this.wildlife = new Wildlife(this.gen, {
+      surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
+      heightAt: (x, z) => this.chunks.heightAt(x, z),
+      treeNear: (x, z, r) => this.chunks.treeNear(x, z, r),
+    });
     this.scene.add(this.wildlife.group);
     this.wildlife.onFishSplash = (x, z, landing) => { if (landing) this.splash.splash(x, z, 0.12); else this.splash.ring(x, z, 0.7); };
-    this.wildlife.onDuckStartle = (x, z) => { this.splash.ring(x, z, 0.9); this.splash.ring(x + 1.6, z - 1.1, 0.6); this.splash.ring(x - 1.2, z + 1.4, 0.6); };
+    this.wildlife.onDuckRipple = (x, z, size) => this.splash.ring(x, z, size);
     this.wildlife.thermalFinder = (x, z, r) => this.airflow.thermalsNear(x, z, r, this.thermalScratch)[0] ?? null;
     this.cameraRig = new CameraRig(this.camera, {
       surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
@@ -628,7 +636,13 @@ export class App {
     this.chunks.update(s.x + fwdX * lookahead, s.z + fwdZ * lookahead, fwdX, fwdZ, this.wallTime);
     this.landmarks.update(s.x, s.z, this.wallTime, this.quality.shadows);
     this.veg.update(this.simTime, 0.83, 0.56, this.wallTime);
-    this.wildlife.update(this.simTime, r.x, r.y, r.z, this.origin.value.x, this.origin.value.z, this.settings.wildlife, this.settings.quality);
+    {
+      const hx = Math.sin(s.heading), hz = -Math.cos(s.heading), horizontal = s.speed * Math.cos(s.pitch);
+      this.wildlifeObserver.x = r.x; this.wildlifeObserver.y = r.y; this.wildlifeObserver.z = r.z;
+      this.wildlifeObserver.vx = hx * horizontal; this.wildlifeObserver.vz = hz * horizontal; this.wildlifeObserver.vy = s.speed * Math.sin(s.pitch) + s.vy;
+      this.wildlifeObserver.boosting = s.boosting;
+      this.wildlife.update(this.simTime, this.wildlifeObserver, this.origin.value.x, this.origin.value.z, this.settings.wildlife, this.settings.quality);
+    }
     this.splash.update(this.simTime, this.origin.value.x, this.origin.value.z, window.innerHeight);
     // Dust motes in the nearest thermals, strongest at midday.
     {
@@ -641,6 +655,8 @@ export class App {
       const dirX = Math.sin(s.heading), dirZ = -Math.cos(s.heading);
       this.splash.skim(s.x, s.z, dirX, dirZ, s.speed, Math.min(1, s.speed / 45));
       if (this.simTime - this.lastSkimRing > 0.22) { this.lastSkimRing = this.simTime; this.splash.ring(s.x, s.z, 0.8 + s.speed / 60); }
+      // Skimming counts as water contact for the fish below (rate-limited; the enter event covers plunges).
+      if (this.simTime - this.lastSkimContact > 0.5) { this.lastSkimContact = this.simTime; this.wildlife.onWaterContact(s.x, s.z, Math.min(1, s.speed / 45), this.simTime); }
     }
 
     // Bird transform (render space).

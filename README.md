@@ -180,7 +180,7 @@ Performance note: the frame is GPU bound on integrated GPUs (measured with `EXT_
 - Shadows cover a ±220 m box around the bird only, and tree shadows are cast by simplified stand-ins (a trunk and a crown blob per tree), so a shadow does not show individual branches.
 - WebGPU is not used; the renderer is WebGL2 only.
 - No gamepad support yet.
-- Ambient animals, balloons and boats are low-poly instanced decorations on fixed circles with scripted reactions, not autonomous agents (no pathfinding, no flocking between groups); "changing skies" varies haze and cloud cover but there is no rain or ring course. The wind is a fixed direction used for lift, trees and clouds, not a simulated field.
+- Ambient animals, balloons and boats are low-poly instanced decorations on fixed circles, not autonomous agents (no pathfinding, no flocking between groups). Their reactions to the bird are a small per-group state machine (idle, alert, evade, recover) driven by a threat estimate from distance, closing speed, height and speed, played on the GPU: flocks swing aside of the approach and re-form, deer turn their heads and then run a checked corridor with a leg cycle, ducks swim off with a ripple trail, fish dive when the bird touches the water nearby. "Changing skies" varies haze and cloud cover but there is no rain or ring course. The wind is a fixed direction used for lift, trees and clouds, not a simulated field.
 
 ## Attribution
 

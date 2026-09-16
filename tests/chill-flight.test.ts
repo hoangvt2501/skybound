@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+const at = (x: number, y: number, z: number) => ({ x, y, z, vx: 0, vy: 0, vz: 0, boosting: false });
 import * as THREE from 'three';
 import { FixedStepClock } from '../src/core/Clock';
 import { BirdModel } from '../src/flight/Bird';
@@ -98,33 +99,33 @@ describe('bounded ambient wildlife', () => {
     const gen = new WorldGen(1207), world = new Wildlife(gen, (x, z) => Math.max(0, gen.heightAt(x, z)));
     const L = gen.layout, wet = gen.regionToWorld(L.wet.x, L.wet.y), spine = gen.regionToWorld(L.spine[1][0], L.spine[1][1]);
     const px = wet.x + (spine.x - wet.x) * 0.3, pz = wet.z + (spine.z - wet.z) * 0.3;
-    for (let i = 0; i < 140; i++) world.update(i / 60, px, 60, pz, 0, 0, 'lively', 'high'); // one habitat per frame (49 ground + 9 flock + 25 balloon cells)
+    for (let i = 0; i < 140; i++) world.update(i / 60, at(px, 60, pz), 0, 0, 'lively', 'high'); // one habitat per frame (49 ground + 9 flock + 25 balloon cells)
     const count = world.counts();
     expect(count.ducks).toBeGreaterThan(0); expect(count.deer).toBeGreaterThan(0); expect(count.birds).toBeGreaterThan(0);
     // Animals animate on the GPU: with the same nearby set, later frames upload no instance data at all.
-    world.update(2, px, 60, pz, 0, 0, 'lively', 'high');
+    world.update(2, at(px, 60, pz), 0, 0, 'lively', 'high');
     const live = world.group.children.filter((o): o is THREE.InstancedMesh => o instanceof THREE.InstancedMesh && o.visible && o.count > 0);
     expect(live.length).toBeGreaterThanOrEqual(3); // birds, deer, ducks (balloons and boats depend on the spot)
     const versionsOf = (m: THREE.InstancedMesh) => [m.instanceMatrix.version, (m.geometry.attributes.aPhase as THREE.BufferAttribute).version, (m.geometry.attributes.aOrbit as THREE.BufferAttribute).version];
     const versions = live.map(versionsOf);
-    for (let i = 1; i <= 30; i++) world.update(2 + i / 60, px, 60, pz, 0, 0, 'lively', 'high');
+    for (let i = 1; i <= 30; i++) world.update(2 + i / 60, at(px, 60, pz), 0, 0, 'lively', 'high');
     expect(live.map(versionsOf)).toEqual(versions);
     expect(live.every(m => m.visible)).toBe(true);
     // Moving far enough selects again, into a different buffer of the ring.
-    world.update(3, px + 150, 60, pz, 0, 0, 'lively', 'high');
+    world.update(3, at(px + 150, 60, pz), 0, 0, 'lively', 'high');
     expect(world.group.children.filter(o => o instanceof THREE.InstancedMesh && o.visible).some(m => live.includes(m as THREE.InstancedMesh))).toBe(false);
     world.dispose();
   });
   it('keeps population bounded through travel, rebasing and the off switch', () => {
     const gen = new WorldGen(1207), world = new Wildlife(gen, (x, z) => Math.max(0, gen.heightAt(x, z)));
     for (let i = 0; i < 100; i++) {
-      world.update(i / 30, i * 40, 160, i * -17, 0, 0, 'lively', 'low');
+      world.update(i / 30, at(i * 40, 160, i * -17), 0, 0, 'lively', 'low');
       const count = world.counts(), budget = wildlifeBudget('lively', 'low');
       expect(count.birds).toBeLessThanOrEqual(budget.birds); expect(count.deer).toBeLessThanOrEqual(budget.deer); expect(count.ducks).toBeLessThanOrEqual(budget.ducks);
     }
-    world.update(4, 4000, 160, -1700, 4000, -2000, 'subtle', 'medium');
+    world.update(4, at(4000, 160, -1700), 4000, -2000, 'subtle', 'medium');
     world.group.traverse(o => { if (o instanceof THREE.InstancedMesh) expect(Array.from(o.instanceMatrix.array).every(Number.isFinite)).toBe(true); });
-    world.update(4, 4000, 160, -1700, 4000, -2000, 'off', 'medium');
+    world.update(4, at(4000, 160, -1700), 4000, -2000, 'off', 'medium');
     expect(world.counts()).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0, fish: 0 }); world.dispose();
   });
 });

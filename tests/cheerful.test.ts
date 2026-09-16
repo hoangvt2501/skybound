@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+const at = (x: number, y: number, z: number) => ({ x, y, z, vx: 0, vy: 0, vz: 0, boosting: false });
 import { BIRD_SPECIES, type BirdSpecies } from '../src/flight/BirdSpecies';
 import { DEFAULT_PROFILE, FlightController, createFlightState, emptyInput, tuneFlight } from '../src/flight/FlightController';
 import { FLIGHT } from '../src/core/config';
@@ -104,10 +105,10 @@ describe('scenery', () => {
     expect(budget).toMatchObject({ balloons: 3, boats: 5 });
     expect(wildlifeBudget('off', 'high')).toEqual({ birds: 0, deer: 0, ducks: 0, balloons: 0, boats: 0, fish: 0 });
     const world = new Wildlife(gen, (x, z) => Math.max(0, gen.heightAt(x, z)));
-    for (let i = 0; i < 140; i++) world.update(i / 60, -4710, 200, 7117, 0, 0, 'lively', 'high');
+    for (let i = 0; i < 140; i++) world.update(i / 60, at(-4710, 200, 7117), 0, 0, 'lively', 'high');
     expect(world.counts().balloons).toBeGreaterThan(0);
     // Open sea north of the wetland coast.
-    for (let i = 0; i < 140; i++) world.update(10 + i / 60, -6585, 60, 12523, 0, 0, 'lively', 'high');
+    for (let i = 0; i < 140; i++) world.update(10 + i / 60, at(-6585, 60, 12523), 0, 0, 'lively', 'high');
     const sea = world.counts();
     expect(sea.boats).toBeGreaterThan(0); expect(sea.boats).toBeLessThanOrEqual(budget.boats);
     expect(sea.fish).toBeGreaterThan(0); expect(sea.fish).toBeLessThanOrEqual(budget.fish);

@@ -842,6 +842,13 @@ export class ChunkManager {
     return Math.max(this.heightAt(gx, gz), SEA_LEVEL);
   }
 
+  /** Is any tree collider within `radius` of a global position? */
+  treeNear(gx: number, gz: number, radius: number): boolean {
+    let hit = false;
+    this.forEachTreeNear(gx, gz, radius, () => { hit = true; return true; });
+    return hit;
+  }
+
   /** Iterate trees whose collider circle intersects the given circle. */
   forEachTreeNear(gx: number, gz: number, radius: number, cb: (t: TreeHit) => boolean | void): void {
     const cx0 = Math.floor((gx - radius) / CHUNK_SIZE), cx1 = Math.floor((gx + radius) / CHUNK_SIZE);
