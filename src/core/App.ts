@@ -1498,7 +1498,7 @@ export class App {
       /** Sit the bird straight onto a perch (by id, or the nearest landmark perch) for pose checks. */
       perchOn: (id?: string) => {
         const s = this.flight.state;
-        const pts = this.perches.landmarkPoints;
+        const pts = id && !id.startsWith('lm:') ? this.perches.near(s.x, s.z, 600) : this.perches.landmarkPoints;
         const p = (id ? pts.find((q) => q.id === id) : null) ?? pts.slice().sort((a, b) => Math.hypot(a.x - s.x, a.z - s.z) - Math.hypot(b.x - s.x, b.z - s.z))[0];
         if (!p) return null;
         s.x = p.x; s.y = p.y + LANDING.birdLift; s.z = p.z; s.speed = 0; s.vy = 0; s.pitch = 0.1; s.pitchSmooth = 0; s.roll = 0;

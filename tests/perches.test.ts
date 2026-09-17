@@ -40,6 +40,22 @@ describe('perches', () => {
     expect(rock.y).toBeCloseTo(10 + SPECIES_COLLIDER[Species.Rock].height * 1.5 - 0.1, 5);
     expect(treePerch(tree(Species.Rock, 1.0))).toBeNull();
   });
+  it('stands the bird on the model peak when the terrain reports one, not on the collider top', () => {
+    const base: TreeLike = { x: 100, y: 10, z: 200, radius: SPECIES_COLLIDER[Species.Pine].radius * 1.3, top: 10 + SPECIES_COLLIDER[Species.Pine].height * 1.3, species: Species.Pine };
+    // Pick a hash-selected tree position so the perch is offered.
+    let t = base;
+    for (let i = 0; i < 400 && !treePerch(t); i++) t = { ...base, x: 100 + i * 37, z: 200 + i * 53 };
+    expect(treePerch(t)).not.toBeNull();
+    const withPeak = treePerch({ ...t, peakX: t.x + 0.3, peakY: t.top + 2.4, peakZ: t.z - 0.2 })!;
+    expect(withPeak.x).toBeCloseTo(t.x + 0.3, 6);
+    expect(withPeak.z).toBeCloseTo(t.z - 0.2, 6);
+    expect(withPeak.y).toBeCloseTo(t.top + 2.4 + 0.05, 6); // just above the crown's highest point
+    expect(withPeak.species).toBe(Species.Pine);
+    expect(withPeak.id).toBe(treePerch(t)!.id); // keyed on the trunk, so the id is stable
+    const rock = treePerch({ x: 5, y: 3, z: 9, radius: SPECIES_COLLIDER[Species.Rock].radius * 1.5, top: 3 + SPECIES_COLLIDER[Species.Rock].height * 1.5, species: Species.Rock, peakX: 6.1, peakY: 7.7, peakZ: 8.4 })!;
+    expect(rock.y).toBeCloseTo(7.7, 6);
+    expect(rock.x).toBeCloseTo(6.1, 6);
+  });
   it('captures only a slow, level or descending pass within reach, from above', () => {
     const p = { id: 'x', kind: 'rock' as const, x: 0, y: 20, z: 0, name: 'a boulder' };
     const base = { x: 3, y: 22, z: 2, speed: 20, vy: -3, boosting: false };

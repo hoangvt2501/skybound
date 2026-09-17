@@ -850,6 +850,29 @@ export class VegetationLibrary {
     return list[variant % list.length];
   }
 
+  private peaks: { x: number; y: number; z: number; crown: number }[][] = [];
+  /**
+   * The highest point of a species variant a bird can stand on, in model space (unit scale, before the
+   * shader's per-instance stretch): for trees the highest vertex within 0.7 m of the trunk axis, so the
+   * point sits over the trunk; for boulders the highest vertex of the whole cluster. `crown` is that
+   * vertex's crown mask, which scales the shader's per-instance crown stretch.
+   */
+  peak(species: Species, variant: number): { x: number; y: number; z: number; crown: number } {
+    const list = this.geometries[species], v = variant % list.length;
+    const cache = (this.peaks[species] ??= []);
+    if (cache[v]) return cache[v];
+    const g = list[v], pos = g.attributes.position, veg = g.attributes.aVeg;
+    const column = species !== Species.Rock;
+    let best = { x: 0, y: -Infinity, z: 0, crown: 0 };
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      if (column && x * x + z * z > 0.49) continue;
+      if (y > best.y) best = { x, y, z, crown: veg ? veg.getY(i) : 0 };
+    }
+    if (best.y === -Infinity) { g.computeBoundingBox(); best = { x: 0, y: g.boundingBox!.max.y, z: 0, crown: 1 }; }
+    return (cache[v] = best);
+  }
+
   /** Advance wind animation (simulation clock) and the dissolve clock (wall clock, so fades finish while paused). */
   update(time: number, windX: number, windZ: number, lifeTime: number): void {
     this.material.vegUniforms.uTime.value = time;

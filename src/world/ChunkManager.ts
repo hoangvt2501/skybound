@@ -72,8 +72,13 @@ export interface TreeHit {
   y: number;
   z: number;
   radius: number;
+  /** Top of the collision cylinder. */
   top: number;
   species: number;
+  /** Highest point of the rendered model over the trunk (world space, with the instance's stretch and yaw). */
+  peakX: number;
+  peakY: number;
+  peakZ: number;
 }
 
 export interface ChunkStats {
@@ -589,10 +594,7 @@ export class ChunkManager {
     if (rep === 'full') {
       // Full trees: one InstancedMesh per (species, geometry variant) present.
       // The variant is a stable hash of the tree position.
-      const variantOf = (o: number) => {
-        const s = trees[o + 3];
-        return hash2(Math.round(trees[o] * 4), Math.round(trees[o + 2] * 4), 77) % this.veg.variants(s);
-      };
+      const variantOf = (o: number) => ChunkManager.treeVariant(trees[o], trees[o + 2], this.veg.variants(trees[o + 3]));
       const key = (s: number, v: number) => s * 8 + v;
       const counts = new Map<number, number>();
       for (let i = 0; i < n; i++) {
@@ -622,7 +624,7 @@ export class ChunkManager {
         _m.compose(_p, _q, _s);
         entry.im.setMatrixAt(entry.cursor, _m);
         entry.shadow.setMatrixAt(entry.cursor, _m);
-        entry.rand[entry.cursor] = hash2(Math.round(trees[o] * 3), Math.round(trees[o + 2] * 3), 913) / 4294967296;
+        entry.rand[entry.cursor] = ChunkManager.treeRand(trees[o], trees[o + 2]);
         entry.cursor++;
       }
       for (const { im, shadow, rand } of meshes.values()) {
@@ -865,11 +867,20 @@ export class ChunkManager {
     return hit;
   }
 
+  /** Geometry variant of a tree: a stable hash of its position (shared by instancing and the perch finder). */
+  static treeVariant(x: number, z: number, variants: number): number {
+    return hash2(Math.round(x * 4), Math.round(z * 4), 77) % variants;
+  }
+  /** Per-instance random of a tree (`aRand`): crown displacement, stretch and wind phase in the shader. */
+  static treeRand(x: number, z: number): number {
+    return hash2(Math.round(x * 3), Math.round(z * 3), 913) / 4294967296;
+  }
+
   /** Iterate trees whose collider circle intersects the given circle. */
   forEachTreeNear(gx: number, gz: number, radius: number, cb: (t: TreeHit) => boolean | void): void {
     const cx0 = Math.floor((gx - radius) / CHUNK_SIZE), cx1 = Math.floor((gx + radius) / CHUNK_SIZE);
     const cz0 = Math.floor((gz - radius) / CHUNK_SIZE), cz1 = Math.floor((gz + radius) / CHUNK_SIZE);
-    const hit: TreeHit = { x: 0, y: 0, z: 0, radius: 0, top: 0, species: 0 };
+    const hit: TreeHit = { x: 0, y: 0, z: 0, radius: 0, top: 0, species: 0, peakX: 0, peakY: 0, peakZ: 0 };
     for (let cz = cz0; cz <= cz1; cz++) {
       for (let cx = cx0; cx <= cx1; cx++) {
         const rec = this.chunks.get(chunkKey(cx, cz));
@@ -885,6 +896,15 @@ export class ChunkManager {
           if (dx * dx + dz * dz > rr * rr) continue;
           hit.x = t[i]; hit.y = t[i + 1]; hit.z = t[i + 2];
           hit.radius = r; hit.top = t[i + 1] + col.height * sc; hit.species = sp;
+          // The model's highest point over the trunk, with the same variant, per-instance crown
+          // stretch and yaw the instance is drawn with (models are planted 0.15 m into the ground).
+          const pk = this.veg.peak(sp, ChunkManager.treeVariant(t[i], t[i + 2], this.veg.variants(sp)));
+          const rnd = ChunkManager.treeRand(t[i], t[i + 2]);
+          const sy = 1 + ((rnd * 7.31) % 1 - 0.5) * 0.14 * pk.crown, sxz = 1 + (rnd - 0.5) * 0.18 * pk.crown;
+          const px = pk.x * sxz * sc, pz = pk.z * sxz * sc, yaw = t[i + 5], cy = Math.cos(yaw), sy2 = Math.sin(yaw);
+          hit.peakX = t[i] + px * cy + pz * sy2;
+          hit.peakZ = t[i + 2] - px * sy2 + pz * cy;
+          hit.peakY = t[i + 1] - 0.15 + pk.y * sy * sc;
           if (cb(hit) === true) return;
         }
       }

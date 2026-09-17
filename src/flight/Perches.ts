@@ -9,8 +9,13 @@ import type { Landmark } from '../world/Landmarks';
 import { hash2, Rng } from '../world/noise';
 
 export type PerchKind = 'landmark' | 'tree' | 'rock';
-export interface Perch { id: string; kind: PerchKind; x: number; y: number; z: number; name: string; landmarkId?: string }
-export interface TreeLike { x: number; y: number; z: number; radius: number; top: number; species: number }
+export interface Perch { id: string; kind: PerchKind; x: number; y: number; z: number; name: string; landmarkId?: string; species?: number }
+/**
+ * A tree or boulder as the terrain reports it: `top` is the collision cylinder's top; `peak*` (when
+ * known) is the highest point of the rendered model over the trunk axis, in world space, which is
+ * where a bird can actually stand.
+ */
+export interface TreeLike { x: number; y: number; z: number; radius: number; top: number; species: number; peakX?: number; peakY?: number; peakZ?: number }
 export interface PerchTerrain {
   forEachTreeNear(x: number, z: number, radius: number, cb: (t: TreeLike) => boolean | void): void;
   heightAt(x: number, z: number): number;
@@ -77,7 +82,12 @@ export function treePerch(t: TreeLike): Perch | null {
     if (hash2(Math.round(t.x), Math.round(t.z), 91) / 4294967296 > LANDING.treeShare) return null;
   }
   const key = `${Math.round(t.x)}:${Math.round(t.z)}`;
-  return { id: `${rock ? 'rock' : 'tree'}:${key}`, kind: rock ? 'rock' : 'tree', x: t.x, y: t.top - (rock ? 0.1 : 0.6), z: t.z, name: rock ? 'a boulder' : 'a treetop' };
+  // Stand on the model's own highest point (the crown over the trunk, the tallest boulder of a cluster);
+  // without it, fall back to the collider top.
+  const hasPeak = t.peakY !== undefined && t.peakX !== undefined && t.peakZ !== undefined;
+  const x = hasPeak ? t.peakX! : t.x, z = hasPeak ? t.peakZ! : t.z;
+  const y = hasPeak ? t.peakY! + (rock ? 0 : 0.05) : t.top - (rock ? 0.1 : 0.6);
+  return { id: `${rock ? 'rock' : 'tree'}:${key}`, kind: rock ? 'rock' : 'tree', x, y, z, name: rock ? 'a boulder' : 'a treetop', species: t.species };
 }
 
 /** Ease-out position progress of the landing glide: fast off the approach, gentle onto the perch. */
