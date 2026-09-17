@@ -22,9 +22,19 @@ export interface BirdPose {
   speed: number;
   /** Brake pose (spread wings/tail) 0..1. */
   brake: number;
+  /** Landing flare 0..1: wings raised and spread, tail fanned, legs reaching down. */
+  flare?: number;
+  /** Perched 0..1: wings folded along the body, legs down, no wingbeat. */
+  perch?: number;
+  /** Head yaw while perched (radians, + = looks right). */
+  lookYaw?: number;
+  /** Preening 0..1: head dips toward a wing. */
+  preen?: number;
 }
 
 type Paint = (t: number, u: number, c: THREE.Color) => void;
+/** Leg hinge angle with the legs tucked back under the tail (flight). 0 = straight down. */
+const LEG_TUCKED = 1.35;
 const _c = new THREE.Color();
 
 /** Fill the colour attribute from a paint callback over (t, u) in [0,1]² stored in uv. */
@@ -141,6 +151,14 @@ export class BirdModel {
   private tailFeathers: THREE.Group[] = [];
   private head: THREE.Group;
   private body: THREE.Mesh;
+  private legs: THREE.Group[] = [];
+  private primaries: { g: THREE.Group; base: number }[] = [];
+  /** Folded-wing orientation of each hinge (left chain, right chain): roll the plate onto the flank, droop, sweep back. */
+  private foldPose: [THREE.Quaternion[], THREE.Quaternion[]];
+  private perchSmooth = 0;
+  private flareSmooth = 0;
+  private lookSmooth = 0;
+  private preenSmooth = 0;
   private phase = 0;
   private flapSmooth = 0;
   private glideBob = 0;
@@ -159,6 +177,18 @@ export class BirdModel {
     const COL_BEAK = new THREE.Color(style.beak), COL_EYE = new THREE.Color('#151010'), COL_GLINT = new THREE.Color('#ffffff');
     const light = COL_WING.clone().lerp(COL_BELLY, 0.45), dark = COL_WING.clone().multiplyScalar(0.72);
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    // Wrapped diffuse: the sun's falloff continues a little past the terminator, so the shaded side and
+    // the far wing keep their colour and read against the ground instead of dropping to a silhouette.
+    this.material.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <lights_lambert_pars_fragment>',
+        THREE.ShaderChunk.lights_lambert_pars_fragment.replace(
+          'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );',
+          'float dotNL = saturate( ( dot( geometryNormal, directLight.direction ) + 0.45 ) / 1.45 );',
+        ),
+      );
+    };
+    this.material.customProgramCacheKey = () => 'skybound-bird-wrap-v1';
     const mat = this.material;
     const mesh = (g: THREE.BufferGeometry) => new THREE.Mesh(g, mat);
 
@@ -289,6 +319,7 @@ export class BirdModel {
             feather.rotation.x = side * (species === 'eagle' ? 0.06 * (1 - f) : 0.02);
             if (side < 0) feather.scale.x = -1;
             hinge.add(feather);
+            this.primaries.push({ g: feather, base: feather.rotation.y });
           }
         }
         parent.add(hinge);
@@ -298,6 +329,11 @@ export class BirdModel {
       }
       if (side < 0) this.wingsL = chain; else this.wingsR = chain;
     }
+    // Folded wing: the upper arm rolls its top surface outward, drops and sweeps back along the flank; the
+    // forearm and hand curve back up so the tips meet over the tail. Euler order YZX = roll, then droop,
+    // then sweep, each about the segment's own axes. The left wing mirrors the yaw and droop.
+    const folded = (roll: number, sweep: number, droop: number, side: number) => new THREE.Quaternion().setFromEuler(new THREE.Euler(roll, side * sweep, side * droop, 'YZX'));
+    this.foldPose = [-1, 1].map((side) => [folded(-1.25, -1.62, -0.5, side), folded(0, -0.26, 0.12, side), folded(0, -0.2, 0.05, side)]) as [THREE.Quaternion[], THREE.Quaternion[]];
 
     // Tail: fan of rounded feathers pivoting at the body rear.
     this.tail = new THREE.Group();
@@ -327,22 +363,38 @@ export class BirdModel {
     }
     this.group.add(this.tail);
 
-    // Tucked feet.
+    // Legs: a hinge under the belly with a thin shank and the foot at its end. Tucked back along the
+    // body in flight (the old pose), swung down to reach for a perch and while sitting on one.
     const footColor = species === 'swallow' ? new THREE.Color('#4a4340') : species === 'owl' ? COL_BELLY.clone().multiplyScalar(0.8) : COL_BEAK;
+    const shankLength = 0.2 * style.body;
     for (const sx of [-1, 1]) {
+      const leg = new THREE.Group();
+      leg.position.set(sx * 0.06 * style.body, -0.09 * style.body, 0.1 * style.body);
+      const shank = mesh(paintFlat(new THREE.CylinderGeometry(0.011 * style.body, 0.014 * style.body, shankLength, 5), footColor));
+      shank.position.y = -shankLength / 2;
+      leg.add(shank);
       const foot = mesh(paintFlat(new THREE.ConeGeometry(0.022, 0.12, 6), footColor));
-      foot.rotation.x = Math.PI / 2 + 0.35;
-      foot.position.set(sx * 0.06 * style.body, -0.11 * style.body, 0.22 * style.body);
-      this.group.add(foot);
+      foot.rotation.x = Math.PI / 2 + 0.2;
+      foot.position.set(0, -shankLength, -0.02 * style.body);
+      leg.add(foot);
+      leg.rotation.x = LEG_TUCKED;
+      this.group.add(leg);
+      this.legs.push(leg);
     }
   }
 
   /** Advance animation. `dt` in seconds. */
   update(dt: number, pose: BirdPose): void {
-    // Smooth transitions between flap and glide.
+    // Smooth transitions between flap and glide, and into the landing / perched poses.
     const k = 1 - Math.exp(-dt * 6);
-    this.flapSmooth += (pose.flap - this.flapSmooth) * k;
+    const perch = pose.perch ?? 0, flare = pose.flare ?? 0;
+    this.perchSmooth += (perch - this.perchSmooth) * (1 - Math.exp(-dt * 5));
+    this.flareSmooth += (flare - this.flareSmooth) * (1 - Math.exp(-dt * 8));
+    this.lookSmooth += ((pose.lookYaw ?? 0) - this.lookSmooth) * (1 - Math.exp(-dt * 3));
+    this.preenSmooth += ((pose.preen ?? 0) - this.preenSmooth) * (1 - Math.exp(-dt * 4));
+    this.flapSmooth += (pose.flap * (1 - this.perchSmooth) - this.flapSmooth) * k;
     const flap = this.flapSmooth;
+    const fold = this.perchSmooth, spread = this.flareSmooth * (1 - fold);
     // Wingbeat: fast while flapping, an occasional slow beat while gliding.
     const freq = THREE.MathUtils.lerp(0.35, 3.1 * pose.beatRate * this.beatMultiplier, flap);
     this.phase += dt * freq * Math.PI * 2;
@@ -368,24 +420,39 @@ export class BirdModel {
       // The hand pitches nose-down on the downstroke and flexes back on the upstroke.
       const twist = flap * stroke * 0.22;
       const flex = flap * Math.max(0, stroke) * 0.35;
-      chain[0].rotation.set(0, side * sweep * -1, sgn * inner);
-      chain[1].rotation.set(twist * 0.5, side * (sweep * -0.6 + flex * 0.5), sgn * mid);
-      chain[2].rotation.set(twist, side * (sweep * -0.5 + flex), sgn * outer);
+      // Flare: wings up and forward to catch the air (positive yaw brings the tips forward).
+      const flareZ = spread * 0.55, flareY = spread * 0.3;
+      chain[0].rotation.set(0, side * (sweep * -1 + flareY), sgn * (inner + flareZ));
+      chain[1].rotation.set(twist * 0.5, side * (sweep * -0.6 + flex * 0.5 + flareY * 0.5), sgn * (mid - spread * 0.1));
+      chain[2].rotation.set(twist, side * (sweep * -0.5 + flex), sgn * (outer - spread * 0.25));
+      // Perched: blend each hinge toward its folded orientation.
+      if (fold > 0.001) {
+        const target = this.foldPose[side < 0 ? 0 : 1];
+        for (let i = 0; i < 3; i++) chain[i].quaternion.slerp(target[i], fold);
+      }
     }
+    // The primaries close their fan as the wing folds.
+    for (const p of this.primaries) p.g.rotation.y = p.base * (1 - fold * 0.8);
 
-    // Tail follows pitch and twists into turns; spreads when braking.
-    this.tail.rotation.x = -pose.pitchInput * 0.35 - pose.brake * 0.4;
+    // Tail follows pitch and twists into turns; spreads when braking or flaring.
+    this.tail.rotation.x = -pose.pitchInput * 0.35 - pose.brake * 0.4 - spread * 0.35 + fold * 0.15;
     this.tail.rotation.z = pose.turnInput * 0.45;
-    const spread = 1 + pose.brake * 0.9 - flap * 0.15;
-    for (const fg of this.tailFeathers) fg.rotation.y = fg.userData.base * spread;
+    const fan = 1 + pose.brake * 0.9 + spread * 0.8 - flap * 0.15 - fold * 0.3;
+    for (const fg of this.tailFeathers) fg.rotation.y = fg.userData.base * fan;
+
+    // Legs swing down for the landing and stay down on the perch.
+    const legAngle = LEG_TUCKED * (1 - Math.max(fold, spread * 0.9));
+    for (const leg of this.legs) leg.rotation.x = legAngle;
 
     // Head stays level-ish: counter part of the pitch; slight look into turns; tiny bob per beat.
-    this.head.rotation.x = -pose.pitchInput * 0.12;
-    this.head.rotation.y = -pose.turnInput * 0.25;
-    this.head.position.y = 0.075 * BIRD_SPECIES[this.species].body + flap * Math.sin(this.phase - 0.9) * 0.008;
+    // On a perch it looks around and dips to preen a wing.
+    this.head.rotation.x = -pose.pitchInput * 0.12 + this.preenSmooth * 0.7;
+    this.head.rotation.y = -pose.turnInput * 0.25 + this.lookSmooth * fold + this.preenSmooth * 1.1;
+    this.head.rotation.z = -this.preenSmooth * 0.5;
+    this.head.position.y = 0.075 * BIRD_SPECIES[this.species].body + flap * Math.sin(this.phase - 0.9) * 0.008 - this.preenSmooth * 0.03;
 
-    // Body bob with each beat.
-    this.body.position.y = flap * Math.sin(this.phase - 0.6) * 0.02;
+    // Body bob with each beat; a slow breath on the perch.
+    this.body.position.y = flap * Math.sin(this.phase - 0.6) * 0.02 + fold * Math.sin(this.glideBob * 1.7) * 0.004;
   }
 
   dispose(): void {

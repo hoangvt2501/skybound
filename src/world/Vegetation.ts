@@ -17,6 +17,10 @@ import * as THREE from 'three';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Rng, Simplex2, hash2 } from './noise';
 import { SPECIES_COUNT, Species } from './biomes';
+import { AERIAL_FRAGMENT, aerialFragment } from './TerrainMaterial';
+
+/** Impostors and ground cover pale sooner and further: a dense far tree line should sink into its hillside. */
+const AERIAL_IMPOSTOR = aerialFragment(200, 2600, 0.5);
 
 // ---------------------------------------------------------------------------
 // Materials
@@ -110,12 +114,15 @@ export class VegetationMaterial extends THREE.MeshLambertMaterial {
       shader.uniforms.uWindStrength = this.vegUniforms.uWindStrength;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>\n${VEG_VERTEX_HEAD}`)
-        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${VEG_VERTEX_BODY}`);
+        .replace('#include <begin_vertex>', `#include <begin_vertex>\n${VEG_VERTEX_BODY}`)
+        // Grounding: the lowest 2 m of every model (trunk foot, boulder base) darken toward the ground.
+        .replace('#include <color_vertex>', `#include <color_vertex>\n  vColor.rgb *= 0.72 + 0.28 * smoothstep(0.0, 2.2, position.y);`);
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}`)
-        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`);
+        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`)
+        .replace('#include <fog_fragment>', `${AERIAL_FRAGMENT}\n#include <fog_fragment>`);
     };
-    this.customProgramCacheKey = () => `skybound-veg-v3-${this.dissolve ? 'd' : 's'}`;
+    this.customProgramCacheKey = () => `skybound-veg-v4-${this.dissolve ? 'd' : 's'}`;
   }
 }
 
@@ -190,7 +197,8 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
         );
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}`)
-        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`);
+        .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`)
+        .replace('#include <fog_fragment>', `${AERIAL_IMPOSTOR}\n#include <fog_fragment>`);
       // Billboards are lit as if facing up, on both sides (no back-face darkening).
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <normal_fragment_begin>',
@@ -199,7 +207,7 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
         nonPerturbedNormal = normal;`,
       );
     };
-    this.customProgramCacheKey = () => `skybound-bb3-${tiles}-${sway}-${this.dissolve ? 'd' : 's'}`;
+    this.customProgramCacheKey = () => `skybound-bb4-${tiles}-${sway}-${this.dissolve ? 'd' : 's'}`;
   }
 }
 

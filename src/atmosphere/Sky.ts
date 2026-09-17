@@ -44,12 +44,18 @@ export class Sky {
           vec3 d = normalize(vDir);
           float h = clamp(d.y, -0.2, 1.0);
           float t = pow(clamp(h, 0.0, 1.0), 0.55);
-          vec3 col = mix(uHorizon, uZenith, t);
+          // With the sun low, the horizon colour belongs to the sunward side: away from the sun the
+          // band cools toward the zenith, so dawn and dusk have a bright side and a shaded side.
+          float lowSun = 1.0 - smoothstep(0.12, 0.45, abs(uSunDir.y));
+          vec2 toSun = normalize(uSunDir.xz + vec2(1e-4, 0.0));
+          float away = 0.5 - 0.5 * dot(normalize(d.xz + vec2(1e-4, 0.0)), toSun);
+          vec3 horizon = mix(uHorizon, mix(uHorizon, uZenith, 0.4), away * lowSun * (1.0 - t));
+          vec3 col = mix(horizon, uZenith, t);
           // Below the horizon: darken toward a haze so the far plane never shows.
-          col = mix(col, uHorizon * 0.85, smoothstep(0.0, -0.2, d.y));
+          col = mix(col, horizon * 0.85, smoothstep(0.0, -0.2, d.y));
           float sd = max(0.0, dot(d, uSunDir));
-          // Sunward horizon warmth.
-          col += uSunColor * pow(sd, 6.0) * 0.18 * (1.0 - t) * (0.4 + 0.6 * uDaylight);
+          // Sunward horizon warmth, stronger while the sun is low.
+          col += uSunColor * pow(sd, 6.0) * (0.18 + 0.2 * lowSun) * (1.0 - t) * (0.4 + 0.6 * uDaylight);
           // Sun disc and glow.
           float disc = smoothstep(0.9993, 0.9997, sd);
           float glow = pow(sd, 240.0) * 0.8 + pow(sd, 32.0) * 0.14;

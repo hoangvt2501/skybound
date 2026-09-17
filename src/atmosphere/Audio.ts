@@ -2,7 +2,7 @@
 import { MusicBox, type MusicStyle } from './Music';
 
 export interface SoundMix { ambienceVolume: number; musicVolume: number; effectsVolume: number }
-export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number; /** 0 sheltered lake .. 1 open sea, for surf loudness */ exposure?: number; /** 0..1 while touching or dripping */ wet?: number }
+export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number; /** 0 sheltered lake .. 1 open sea, for surf loudness */ exposure?: number; /** 0..1 while touching or dripping */ wet?: number; /** sitting on a perch: a leafy breeze and busier songbirds instead of airflow */ resting?: boolean }
 const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
 /** Total wind level for a speed; the two layers below split it by timbre. */
@@ -171,10 +171,12 @@ export class AudioSystem {
     // Gusts: a slow random walk so the air never sits on one level.
     if (t >= this.nextGust) { this.gustTarget = 0.6 + Math.random() * 0.65; this.nextGust = t + 1.5 + Math.random() * 3.5; }
     this.gust += (this.gustTarget - this.gust) * 0.05;
-    const amount = clamp((speed - 10) / 75);
-    const total = windLevel(speed, boosting);
-    this.airGain.gain.setTargetAtTime(total * 0.75 * this.gust, t, 0.5);
-    this.airFilter.frequency.setTargetAtTime(700 + amount * 900 + (boosting ? 250 : 0), t, 0.8);
+    const resting = !!environment.resting;
+    const amount = resting ? 0 : clamp((speed - 10) / 75);
+    // On a perch the airflow gives way to a soft breeze through the leaves that swells with the gusts.
+    const total = resting ? 0.03 : windLevel(speed, boosting);
+    this.airGain.gain.setTargetAtTime(total * 0.75 * this.gust, t, resting ? 1.2 : 0.5);
+    this.airFilter.frequency.setTargetAtTime(resting ? 480 + 160 * this.gust : 700 + amount * 900 + (boosting ? 250 : 0), t, 0.8);
     this.rushGain.gain.setTargetAtTime(total * (0.15 + 0.85 * amount * amount) * (boosting ? 1.4 : 0.9), t, 0.7);
     const near = 1 - clamp(environment.aboveGround / 200);
     // Surf swells with exposure: open sea is louder and brighter than a sheltered lake.
@@ -190,11 +192,16 @@ export class AudioSystem {
       this.varioLfo.frequency.setTargetAtTime(1.6 + 3.2 * lv, t, 0.2);
     }
     if (t >= this.nextBird) {
-      this.nextBird = t + 9 + Math.random() * 12;
-      if (near > 0.12 && environment.daylight > 0.25 && !environment.water && !this.muted && this.mix.ambienceVolume > 0) {
-        const pitch = 1200 + Math.random() * 550;
-        this.tone(pitch, pitch * 1.28, 0.018 * near, 0.22, t, this.ambience!, Math.random() * 1.2 - 0.6);
-        this.tone(pitch * 1.15, pitch * 0.94, 0.012 * near, 0.18, t + 0.27, this.ambience!, 0.2);
+      // Songbirds call every 9-21 s near the ground; a resting bird hears them every 3-8 s, in longer phrases.
+      this.nextBird = t + (resting ? 3 + Math.random() * 5 : 9 + Math.random() * 12);
+      if ((near > 0.12 || resting) && environment.daylight > 0.25 && !environment.water && !this.muted && this.mix.ambienceVolume > 0) {
+        const pitch = 1200 + Math.random() * 550, level = resting ? 0.022 : 0.018 * near, pan = Math.random() * 1.2 - 0.6;
+        this.tone(pitch, pitch * 1.28, level, 0.22, t, this.ambience!, pan);
+        this.tone(pitch * 1.15, pitch * 0.94, level * 0.66, 0.18, t + 0.27, this.ambience!, pan * 0.4 + 0.2);
+        if (resting && Math.random() < 0.7) {
+          const answer = pitch * (0.78 + Math.random() * 0.3);
+          for (let i = 0; i < 2 + Math.floor(Math.random() * 3); i++) this.tone(answer * (1 + 0.06 * (i % 2)), answer * 1.18, level * 0.55, 0.13, t + 0.62 + i * 0.16, this.ambience!, -pan * 0.7);
+        }
       }
     }
   }

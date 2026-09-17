@@ -19,6 +19,27 @@
 import * as THREE from 'three';
 import { NOISE_CELLS, noiseTexture } from './NoiseTexture';
 
+/**
+ * Aerial perspective, shared by the terrain and vegetation materials: from a few hundred metres out the
+ * lit colour loses saturation and contrast toward the fog colour, well before the scene fog itself
+ * takes over, so far slopes read as pale masses behind the near ground rather than as more of it.
+ * Runs after tone mapping, right before the fog mix, and only when the scene has fog.
+ */
+export function aerialFragment(start: number, end: number, strength: number): string {
+  return /* glsl */ `
+  #ifdef USE_FOG
+  {
+    float aerial = smoothstep(${start.toFixed(1)}, ${end.toFixed(1)}, vFogDepth);
+    float lum = dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    vec3 pale = mix(vec3(lum), fogColor, 0.7);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, pale, aerial * ${strength.toFixed(2)});
+  }
+  #endif
+`;
+}
+/** Terrain and full-geometry trees: paling from 300 m, half strength at ~1.6 km. */
+export const AERIAL_FRAGMENT = aerialFragment(300, 3000, 0.45);
+
 export interface TerrainUniforms {
   uOrigin: { value: THREE.Vector2 };
   uDetail: { value: number };
@@ -95,7 +116,9 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
             float steep = 1.0 - wn.y;
             float dist = length(vViewPosition);
             float nearFade = (1.0 - smoothstep(180.0, 700.0, dist)) * uDetail;
-            float midFade = 1.0 - smoothstep(900.0, 3200.0, dist);
+            // The mid-field mottle fades out sooner than before: past ~2 km the ground should read as
+            // broad masses of colour, not texture.
+            float midFade = 1.0 - smoothstep(500.0, 2200.0, dist);
             // Grain: fine near-field grain (near pixels only) and a broader mid-field mottle.
             float n1 = nearFade > 0.001 ? tNoise(vWPos.xz * 0.45) : 0.5;
             // The mid-field mottle carries a finer octave: the old sine-hash noise picked up grain from
@@ -104,10 +127,14 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
             float n3 = tNoise(vWPos.xz * 0.012 + 9.7);
             // Mottle contrast is lower than with the old sine hash: at large coordinates that hash lost
             // precision and clustered its values, so the baked noise reads stronger for the same weight.
-            col *= 1.0 + (n1 - 0.5) * 0.16 * nearFade + (n2 - 0.5) * 0.08 * midFade + (n3 - 0.5) * 0.05;
+            col *= 1.0 + (n1 - 0.5) * 0.16 * nearFade + (n2 - 0.5) * 0.06 * midFade + (n3 - 0.5) * 0.035;
+            // Soil: as the ground steepens the grass thins to a dusty brown before bare rock takes over,
+            // so grass, soil and rock blend over a wide band instead of meeting at one edge.
+            float soil = smoothstep(0.07, 0.30, steep + (n2 - 0.5) * 0.08) * (1.0 - vAux.w) * (1.0 - vAux.x);
+            col = mix(col, mix(col, vec3(0.19, 0.155, 0.115), 0.55), soil * 0.75);
             // Rock on steep faces, using the interpolated normal. The strata and
             // crack work only runs where rock is actually visible.
-            float rockMask = smoothstep(0.22, 0.46, steep + vAux.y * 0.16 + (n2 - 0.5) * 0.1);
+            float rockMask = smoothstep(0.20, 0.52, steep + vAux.y * 0.16 + (n2 - 0.5) * 0.1);
             if (rockMask > 0.003) {
               vec3 rockA = vec3(0.155, 0.135, 0.115);
               vec3 rockB = vec3(0.30, 0.27, 0.235);
@@ -136,17 +163,18 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
             // Snow collects on gentle shelves and sheds on steeper faces; a
             // 16 m mottle and altitude drive the patchy edge instead of a band.
             float exposure = 0.05 * clamp(-wn.z, 0.0, 1.0);
-            float snowSlope = 1.0 - smoothstep(0.16, 0.5, steep + (n2 - 0.5) * 0.34 - exposure);
+            float snowSlope = 1.0 - smoothstep(0.14, 0.55, steep + (n2 - 0.5) * 0.34 - exposure);
             float snow = clamp(vAux.x + exposure, 0.0, 1.0) * snowSlope;
-            snow = smoothstep(0.18, 0.72, snow + (n1 - 0.5) * 0.14 * nearFade);
+            snow = smoothstep(0.12, 0.8, snow + (n1 - 0.5) * 0.14 * nearFade);
             col = mix(col, vec3(0.70, 0.75, 0.86), snow);
             // Wet banks near the water line.
             col = mix(col, col * vec3(0.58, 0.56, 0.5), vAux.z);
             diffuseColor.rgb = col;
           }`,
-        );
+        )
+        .replace('#include <fog_fragment>', `${AERIAL_FRAGMENT}\n#include <fog_fragment>`);
     };
-    this.customProgramCacheKey = () => 'skybound-terrain-v6';
+    this.customProgramCacheKey = () => 'skybound-terrain-v7';
   }
 
   /** A material instance for one morphing chunk: same program and shared uniforms, its own `uMorph`. */

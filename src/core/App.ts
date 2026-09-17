@@ -13,6 +13,7 @@ import { Autopilot } from '../flight/Autopilot';
 import { BIRD_SPECIES } from '../flight/BirdSpecies';
 import { Wildlife, type Observer } from '../world/Wildlife';
 import { BirdModel } from '../flight/Bird';
+import { LANDING, PerchFinder, canCapture, landingFlare, landingProgress, type Perch } from '../flight/Perches';
 import { renderBirdPortraits } from '../ui/BirdPortraits';
 import { PhotoPanel } from '../ui/PhotoPanel';
 import { SplashEffects } from '../atmosphere/Splash';
@@ -132,6 +133,17 @@ export class App {
   private apInput: FlightInput = emptyInput();
   private lastFrame = 0;
   private simTime = 0;
+  private perches!: PerchFinder;
+  /** Landing on, sitting on or leaving a perch; null in free flight. The physics step pauses meanwhile. */
+  private perchState: { phase: 'landing' | 'perched' | 'takeoff'; perch: Perch; t: number; from: { x: number; y: number; z: number; pitch: number; speed: number } } | null = null;
+  private perchCandidate: Perch | null = null;
+  private perchScanAt = -Infinity;
+  private perchHintId = '';
+  private perchHintAt = -Infinity;
+  private lastTakeoffAt = -Infinity;
+  private perchMarker!: THREE.Sprite;
+  /** Soft contact shadow under the bird while it lands, sits and hops off: grounds it on the perch. */
+  private perchShadow!: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   private wallTime = 0;
   private lastSave = 0;
   private lastUiUpdate = -1;
@@ -246,6 +258,14 @@ export class App {
     this.bird = new BirdModel(this.settings.birdSpecies);
     this.bird.group.scale.setScalar(1.6);
     this.scene.add(this.bird.group);
+    this.perches = new PerchFinder(this.landmarks.landmarks, this.gen.seed, {
+      forEachTreeNear: (x, z, r, cb) => this.chunks.forEachTreeNear(x, z, r, cb),
+      heightAt: (x, z) => this.chunks.heightAt(x, z),
+    });
+    this.perchMarker = App.makePerchMarker();
+    this.scene.add(this.perchMarker);
+    this.perchShadow = App.makePerchShadow();
+    this.scene.add(this.perchShadow);
     this.wildlife = new Wildlife(this.gen, {
       surfaceAt: (x, z) => this.chunks.surfaceAt(x, z),
       heightAt: (x, z) => this.chunks.heightAt(x, z),
@@ -471,6 +491,43 @@ export class App {
     onDemand.forEach((o, i) => { o.visible = was[i]; });
   }
 
+  /** A soft ring sprite hovering over the perch the bird is being offered. */
+  private static makePerchShadow(): THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial> {
+    const size = 64, canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, 'rgba(20, 18, 24, 0.85)');
+    grad.addColorStop(0.45, 'rgba(20, 18, 24, 0.5)');
+    grad.addColorStop(1, 'rgba(20, 18, 24, 0)');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, size, size);
+    const map = new THREE.CanvasTexture(canvas);
+    map.colorSpace = THREE.SRGBColorSpace;
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, opacity: 0 }));
+    mesh.renderOrder = 2; mesh.visible = false; mesh.name = 'perch-shadow';
+    return mesh;
+  }
+
+  private static makePerchMarker(): THREE.Sprite {
+    const size = 128, canvas = document.createElement('canvas');
+    canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d')!;
+    const grad = ctx.createRadialGradient(size / 2, size / 2, size * 0.18, size / 2, size / 2, size * 0.5);
+    grad.addColorStop(0, 'rgba(255, 240, 190, 0)');
+    grad.addColorStop(0.55, 'rgba(255, 240, 190, 0)');
+    grad.addColorStop(0.7, 'rgba(255, 240, 190, 0.9)');
+    grad.addColorStop(0.82, 'rgba(255, 240, 190, 0.35)');
+    grad.addColorStop(1, 'rgba(255, 240, 190, 0)');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = 'rgba(255, 246, 210, 0.95)';
+    ctx.beginPath(); ctx.arc(size / 2, size / 2, size * 0.07, 0, Math.PI * 2); ctx.fill();
+    const map = new THREE.CanvasTexture(canvas);
+    map.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthWrite: false, depthTest: false, opacity: 0.9 }));
+    sprite.renderOrder = 8; sprite.visible = false; sprite.name = 'perch-marker';
+    return sprite;
+  }
+
   private beginFlight(): void {
     // A quick Start click can beat the start-screen warm-up; compile now rather than mid-flight.
     if (!this.shadersWarm) { this.shadersWarm = true; this.warmShaders(); }
@@ -543,19 +600,39 @@ export class App {
       this.interpolate(this.frozen ? 1 : this.clock.alpha);
       if (this.phase !== 'photo') this.day.advance(dt);
       this.cameraRig.update(dt, this.renderState, cam);
+      if (this.phase === 'flying') this.scanPerches();
+      const ps = this.perchState;
+      const u = ps ? Math.min(1, ps.t / (ps.phase === 'landing' ? LANDING.seconds : LANDING.takeoffSeconds)) : 0;
+      const perched = ps?.phase === 'perched';
+      const preenCycle = this.simTime % 11;
       this.bird.update(dt, {
-        flap: this.flight.state.flapping ? 1 : this.flight.state.boosting ? 0.6 : 0,
+        flap: ps ? (ps.phase === 'takeoff' ? 1 : 0) : this.flight.state.flapping ? 1 : this.flight.state.boosting ? 0.6 : 0,
         beatRate: this.flight.state.boosting ? 1.35 : 1,
         pitchInput: this.flight.state.pitchSmooth,
         turnInput: this.flight.state.turnSmooth,
         speed: this.flight.state.speed,
-        brake: this.frameInput.brake,
+        brake: ps ? 0 : this.frameInput.brake,
+        flare: ps?.phase === 'landing' ? landingFlare(u) : ps?.phase === 'takeoff' ? 0.35 * (1 - u) : 0,
+        perch: perched ? 1 : ps?.phase === 'landing' ? Math.max(0, (u - 0.75) / 0.25) : 0,
+        lookYaw: perched ? 0.75 * Math.sin(this.simTime * 0.31) * Math.sin(this.simTime * 0.13 + 1) : 0,
+        preen: perched && preenCycle > 6 && preenCycle < 7.4 ? Math.sin(Math.PI * (preenCycle - 6) / 1.4) : 0,
       });
+      // Contact shadow on the perch: fades in over the touchdown and out again on the hop.
+      this.perchShadow.visible = !!ps;
+      if (ps) {
+        const k = ps.phase === 'landing' ? THREE.MathUtils.smoothstep(u, 0.35, 1) : ps.phase === 'perched' ? 1 : 1 - u;
+        this.perchShadow.position.set(ps.perch.x - this.origin.value.x, ps.perch.y + 0.04, ps.perch.z - this.origin.value.z);
+        this.perchShadow.rotation.set(-Math.PI / 2, -this.flight.state.heading, 0, 'YXZ');
+        const span = this.bird.wingspan;
+        this.perchShadow.scale.set(span * 0.5, span * 0.72, 1);
+        this.perchShadow.material.opacity = 0.55 * k * (0.25 + 0.75 * this.day.palette.daylight);
+      }
       this.audio.update(dt, this.flight.state.speed, this.flight.state.flapping, this.flight.state.boosting, (this.flight.state.boosting ? 1.35 : 1) * BIRD_SPECIES[this.settings.birdSpecies].beat, {
         exposure: this.waterExposureAt(this.flight.state.x, this.flight.state.z), wet: this.flight.state.wet,
         aboveGround: this.flight.state.y - this.chunks.surfaceAt(this.flight.state.x, this.flight.state.z),
         water: this.chunks.heightAt(this.flight.state.x, this.flight.state.z) < SEA_LEVEL,
         daylight: Math.max(0, Math.sin((this.day.time - 0.25) * Math.PI * 2)),
+        resting: perched,
       });
     } else if (this.phase === 'start') {
       // Idle: gentle glide animation, camera slowly orbits.
@@ -601,7 +678,12 @@ export class App {
         input = this.apInput;
       }
     }
-    this.flight.step(input, this.clock.step);
+    if (this.perchState) {
+      this.stepPerch(input);
+    } else {
+      this.flight.step(input, this.clock.step);
+      this.maybeCapturePerch();
+    }
     this.simTime += this.clock.step;
     this.stepCounter++;
     if (this.stepCounter % 6 === 0) {
@@ -612,6 +694,75 @@ export class App {
     if (this.origin.maybeRebase(s.x, s.z)) {
       this.cameraRig.setOrigin(this.origin.value.x, this.origin.value.z);
       this.chunks.setOrigin(this.origin.value.x, this.origin.value.z);
+    }
+  }
+
+  /**
+   * A slow pass close over a perch captures it: the physics pauses and the bird glides the last few
+   * metres onto the point (flare, legs down), then sits until Space (or the autopilot) lifts it off.
+   */
+  private maybeCapturePerch(): void {
+    const s = this.flight.state;
+    if (this.autopilot.enabled || s.speed > LANDING.maxSpeed || this.simTime - this.lastTakeoffAt < 2.5) return;
+    let perch: Perch | null = null;
+    const c = this.perchCandidate;
+    if (c && canCapture(s, c)) perch = c;
+    else if (this.stepCounter % 4 === 0) for (const p of this.perches.near(s.x, s.z, LANDING.captureRadius + 2)) if (canCapture(s, p)) { perch = p; break; }
+    if (!perch) return;
+    this.perchState = { phase: 'landing', perch, t: 0, from: { x: s.x, y: s.y, z: s.z, pitch: s.pitch, speed: s.speed } };
+    s.boosting = false; s.flapping = false; s.onWater = false; s.turnSmooth = 0;
+    this.perchCandidate = null;
+  }
+
+  private stepPerch(input: FlightInput): void {
+    const st = this.perchState!, s = this.flight.state, dt = this.clock.step, p = st.perch;
+    st.t += dt; s.time += dt;
+    const restY = p.y + LANDING.birdLift;
+    if (st.phase === 'landing') {
+      const u = st.t / LANDING.seconds, k = landingProgress(u);
+      s.x = st.from.x + (p.x - st.from.x) * k; s.z = st.from.z + (p.z - st.from.z) * k; s.y = st.from.y + (restY - st.from.y) * k;
+      s.speed = st.from.speed * (1 - k); s.vy = 0; s.roll *= 0.85; s.turnSmooth = 0;
+      s.pitch = st.from.pitch * (1 - k) + landingFlare(u) * 0.55 + 0.1 * k; s.pitchSmooth = s.pitch;
+      if (u >= 1) {
+        st.phase = 'perched'; st.t = 0;
+        s.x = p.x; s.y = restY; s.z = p.z; s.speed = 0; s.pitch = 0.1; s.pitchSmooth = 0; s.roll = 0;
+        this.hud.toast(`Perched on ${p.name} · Space to take off`, 'info', 4500);
+        this.cameraRig.addShake(0.08);
+        this.saveDirty = true;
+      }
+    } else if (st.phase === 'perched') {
+      s.x = p.x; s.y = restY; s.z = p.z; s.speed = 0; s.vy = 0; s.pitch = 0.1; s.roll = 0; s.lift = 0;
+      s.boost = Math.min(FLIGHT.boostCapacity, s.boost + FLIGHT.boostRecovery * dt); // resting restores the boost
+      if (input.flap || this.autopilot.enabled) { st.phase = 'takeoff'; st.t = 0; }
+    } else {
+      const u = Math.min(1, st.t / LANDING.takeoffSeconds);
+      const fx = Math.sin(s.heading), fz = -Math.cos(s.heading);
+      s.x = p.x + fx * 3 * u * u; s.z = p.z + fz * 3 * u * u; s.y = restY + 1.2 * Math.sin(Math.PI * u) + 0.4 * u;
+      s.speed = LANDING.takeoffSpeed * u; s.pitch = 0.3 * (1 - u) + 0.1; s.pitchSmooth = s.pitch; s.flapping = true;
+      if (u >= 1) { this.perchState = null; s.speed = LANDING.takeoffSpeed; s.vy = 2.5; this.lastTakeoffAt = this.simTime; }
+    }
+  }
+
+  /** Every quarter second in free flight: pick the perch to show, move the marker, hint once per perch. */
+  private scanPerches(): void {
+    const s = this.flight.state;
+    if (this.perchState || this.autopilot.enabled) { this.perchCandidate = null; this.perchMarker.visible = false; return; }
+    if (this.simTime - this.perchScanAt >= 0.25) {
+      this.perchScanAt = this.simTime;
+      this.perchCandidate = this.perches.best(s.x, s.y, s.z, Math.sin(s.heading), -Math.cos(s.heading));
+      const c = this.perchCandidate;
+      if (c && c.id !== this.perchHintId && this.simTime - this.perchHintAt > 25 && Math.hypot(c.x - s.x, c.z - s.z) < 140) {
+        this.perchHintId = c.id; this.perchHintAt = this.simTime;
+        this.hud.toast(`Perch ahead: ${c.name}. Slow down (X) and glide onto the marker to land`, 'info', 4500);
+      }
+    }
+    const c = this.perchCandidate;
+    this.perchMarker.visible = !!c;
+    if (c) {
+      this.perchMarker.position.set(c.x - this.origin.value.x, c.y + 0.9, c.z - this.origin.value.z);
+      const pulse = 1 + 0.12 * Math.sin(this.simTime * 4);
+      const d = Math.hypot(c.x - s.x, c.y - s.y, c.z - s.z);
+      this.perchMarker.scale.setScalar((1.6 + d * 0.012) * pulse);
     }
   }
 
@@ -976,6 +1127,7 @@ export class App {
   }
 
   private recover(): void {
+    this.perchState = null;
     this.flight.recover();
     copyFlightState(this.flight.state, this.prevState);
     copyFlightState(this.flight.state, this.renderState);
@@ -1340,8 +1492,26 @@ export class App {
       loadedAtPlayer: this.chunks.isLoadedAt(this.flight.state.x, this.flight.state.z),
       groundAt: (x: number, z: number) => this.chunks.heightAt(x, z),
       setWaypoint: (x: number, z: number) => this.setWaypoint(x, z, null),
+      perch: () => ({ phase: this.perchState?.phase ?? null, perch: this.perchState?.perch ?? null, t: this.perchState?.t ?? 0, candidate: this.perchCandidate }),
+      perchPoints: (r = 200) => this.perches.near(this.flight.state.x, this.flight.state.z, r),
+      landmarkPerches: () => this.perches.landmarkPoints,
+      /** Sit the bird straight onto a perch (by id, or the nearest landmark perch) for pose checks. */
+      perchOn: (id?: string) => {
+        const s = this.flight.state;
+        const pts = this.perches.landmarkPoints;
+        const p = (id ? pts.find((q) => q.id === id) : null) ?? pts.slice().sort((a, b) => Math.hypot(a.x - s.x, a.z - s.z) - Math.hypot(b.x - s.x, b.z - s.z))[0];
+        if (!p) return null;
+        s.x = p.x; s.y = p.y + LANDING.birdLift; s.z = p.z; s.speed = 0; s.vy = 0; s.pitch = 0.1; s.pitchSmooth = 0; s.roll = 0;
+        this.perchState = { phase: 'perched', perch: p, t: 0, from: { x: s.x, y: s.y, z: s.z, pitch: 0, speed: 0 } };
+        copyFlightState(s, this.prevState);
+        copyFlightState(s, this.renderState);
+        this.cameraRig.snap();
+        this.chunks.update(p.x, p.z, Math.sin(s.heading), -Math.cos(s.heading), this.wallTime, true);
+        return p;
+      },
       teleport: (x: number, z: number, y?: number) => {
         const s = this.flight.state;
+        this.perchState = null;
         s.x = x; s.z = z;
         s.y = y ?? Math.max(this.gen.heightAt(x, z), SEA_LEVEL) + 120;
         copyFlightState(s, this.prevState);

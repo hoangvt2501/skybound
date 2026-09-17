@@ -497,7 +497,7 @@ export class WorldGen {
     if (w[Biome.Temperate] > 0) {
       // Restrained greens: woodland floor to dry meadow.
       const m = smoothstep(0.35, 0.75, n1);
-      const tr = lerp(0.32, 0.55, m), tg = lerp(0.45, 0.55, m), tb = lerp(0.21, 0.29, m);
+      const tr = lerp(0.32, 0.52, m), tg = lerp(0.45, 0.54, m), tb = lerp(0.21, 0.30, m);
       r += w[Biome.Temperate] * tr; g += w[Biome.Temperate] * tg; b += w[Biome.Temperate] * tb;
     }
     if (w[Biome.Alpine] > 0) {

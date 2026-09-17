@@ -44,12 +44,31 @@ const HORIZON: [number, THREE.Color][] = [
 const SUN: [number, THREE.Color][] = [
   [0.0, C('#9fb4e6')], [0.44, C('#a3a8d0')], [0.47, C('#ff8c4a')], [0.52, C('#ffc88a')], [0.6, C('#fff0d8')], [1.0, C('#fff6e8')],
 ];
+// Around sunrise the sky light stays cool and fairly strong while the sun is orange, so shadows read
+// blue against the warm lit faces instead of going muddy.
 const AMB_SKY: [number, THREE.Color][] = [
-  [0.0, C('#3a4c78')], [0.46, C('#3d4468')], [0.52, C('#8fa4c8')], [1.0, C('#9fc3ea')],
+  [0.0, C('#3a4c78')], [0.46, C('#3d4468')], [0.49, C('#5e73b0')], [0.52, C('#8aa4d2')], [1.0, C('#9fc3ea')],
 ];
 const AMB_GROUND: [number, THREE.Color][] = [
-  [0.0, C('#1e2430')], [0.46, C('#33302c')], [0.52, C('#6a5a48')], [1.0, C('#6e6a58')],
+  [0.0, C('#1e2430')], [0.46, C('#33302c')], [0.49, C('#4a4650')], [0.52, C('#6a5a48')], [1.0, C('#6e6a58')],
 ];
+// Evening variants blended in through the afternoon: the sunset horizon goes rose and amber under a
+// violet zenith, the sun a deeper orange, so dusk is not a replay of dawn.
+const ZENITH_EVE: [number, THREE.Color][] = [
+  [0.0, C('#0b1430')], [0.42, C('#161a44')], [0.47, C('#4a3f7c')], [0.52, C('#6a7ec0')], [0.6, C('#5a8fd4')], [1.0, C('#3f7fd0')],
+];
+const HORIZON_EVE: [number, THREE.Color][] = [
+  [0.0, C('#1a2440')], [0.42, C('#3a2a4c')], [0.47, C('#e8785a')], [0.52, C('#f2b088')], [0.6, C('#d9dcec')], [1.0, C('#c9dff2')],
+];
+const SUN_EVE: [number, THREE.Color][] = [
+  [0.0, C('#9fb4e6')], [0.44, C('#a3a8d0')], [0.47, C('#ff7040')], [0.52, C('#ffb070')], [0.6, C('#ffe8cc')], [1.0, C('#fff6e8')],
+];
+const _eve = new THREE.Color();
+function mixDayEve(out: THREE.Color, day: [number, THREE.Color][], eve: [number, THREE.Color][], t: number, evening: number): THREE.Color {
+  mixColors(out, day, t);
+  if (evening > 0.001) out.lerp(mixColors(_eve, eve, t), evening);
+  return out;
+}
 
 export class DayCycle {
   /** 0..1 time of day. */
@@ -98,13 +117,15 @@ export class DayCycle {
     this.sunDir.set(-az * 0.92, elev, 0.38 * Math.max(0.2, Math.abs(az) * 0.5 + 0.5)).normalize();
     this.moonDir.set(az * 0.85, -elev * 0.9 + 0.1, -0.45).normalize();
     const e = (elev + 1) / 2;
+    // 0 through the morning, rising over the afternoon to 1 at sunset and through the night.
+    const evening = THREE.MathUtils.smoothstep(-az, 0.05, 0.85);
     const p = this.palette;
-    mixColors(p.zenith, ZENITH, e);
-    mixColors(p.horizon, HORIZON, e);
+    mixDayEve(p.zenith, ZENITH, ZENITH_EVE, e, evening);
+    mixDayEve(p.horizon, HORIZON, HORIZON_EVE, e, evening);
     // Fog sits between horizon and zenith so distant terrain reads as blue
     // silhouettes rather than white cut-outs.
     p.fog.copy(p.horizon).lerp(p.zenith, 0.42);
-    mixColors(p.sunColor, SUN, e);
+    mixDayEve(p.sunColor, SUN, SUN_EVE, e, evening);
     mixColors(p.ambientSky, AMB_SKY, e);
     mixColors(p.ambientGround, AMB_GROUND, e);
     const daylight = THREE.MathUtils.smoothstep(elev, -0.12, 0.18);
