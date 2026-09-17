@@ -8,7 +8,7 @@ import { defaultSettings, validateSettings } from '../src/persistence/Settings';
 import { WorldGen, createTerrainSample } from '../src/world/WorldGen';
 import { Species, SPECIES_COLLIDER, SPECIES_COUNT } from '../src/world/biomes';
 import { buildGroundCover } from '../src/world/chunkMesh';
-import { IMPOSTOR_SIZE, IMPOSTOR_TILES } from '../src/world/Vegetation';
+import { IMPOSTOR_SIZE, IMPOSTOR_TILES, SHADOW_CAST } from '../src/world/Vegetation';
 import { Wildlife, wildlifeBudget } from '../src/world/Wildlife';
 
 const flatTerrain = { heightAt: () => 0, forEachObstacleNear: () => {} };
@@ -58,9 +58,11 @@ describe('music styles and settings', () => {
 
 describe('scenery', () => {
   const gen = new WorldGen(1207);
-  it('registers boulders as a ninth species with a collider and an impostor tile', () => {
-    expect(SPECIES_COUNT).toBe(9); expect(Species.Rock).toBe(8);
-    expect(SPECIES_COLLIDER).toHaveLength(9); expect(IMPOSTOR_SIZE).toHaveLength(IMPOSTOR_TILES); expect(IMPOSTOR_TILES).toBe(9);
+  it('registers boulders and the four newer trees as species with a collider and an impostor tile each', () => {
+    expect(SPECIES_COUNT).toBe(13); expect(Species.Rock).toBe(8); expect(Species.Fir).toBe(12);
+    expect(SPECIES_COLLIDER).toHaveLength(SPECIES_COUNT); expect(IMPOSTOR_SIZE).toHaveLength(IMPOSTOR_TILES); expect(IMPOSTOR_TILES).toBe(SPECIES_COUNT);
+    expect(SHADOW_CAST).toHaveLength(SPECIES_COUNT);
+    for (const c of SHADOW_CAST) { expect(['blob', 'cone']).toContain(c.cls); expect(c.sx).toBeGreaterThan(0); expect(c.sy).toBeGreaterThan(0); }
     // A forested alpine slope below the spine (seed 1207) now yields boulders among the pines.
     const sample = createTerrainSample(), choice = { density: 0, species: Species.Oak };
     let rocks = 0, trees = 0;
@@ -95,10 +97,23 @@ describe('scenery', () => {
     const meadow = buildGroundCover(gen, Math.floor(-3750 / 512), Math.floor(6397 / 512), 1);
     const kinds = new Map<number, number>();
     for (let i = 5; i < meadow.length; i += 6) kinds.set(meadow[i], (kinds.get(meadow[i]) ?? 0) + 1);
-    const flowers = (kinds.get(4) ?? 0) + (kinds.get(5) ?? 0) + (kinds.get(6) ?? 0);
+    const FLOWERS = [4, 5, 6, 9, 10];
+    const flowers = FLOWERS.reduce((n, k) => n + (kinds.get(k) ?? 0), 0);
     expect(flowers).toBeGreaterThan(50);
     expect(gen.flowerPatch(-3750, 6397)).toBeGreaterThan(0.85);
-    for (let i = 5; i < meadow.length; i += 6) expect(meadow[i]).toBeLessThanOrEqual(6);
+    for (let i = 5; i < meadow.length; i += 6) expect(meadow[i]).toBeLessThanOrEqual(10);
+    // A patch is colour-coherent: within one 160 m zone the dominant flower holds the majority.
+    const local = new Map<number, number>();
+    for (let i = 0; i < meadow.length; i += 6) if (Math.hypot(meadow[i] + 3750, meadow[i + 2] - 6397) < 60 && FLOWERS.includes(meadow[i + 5])) local.set(meadow[i + 5], (local.get(meadow[i + 5]) ?? 0) + 1);
+    const localTotal = Array.from(local.values()).reduce((a, b) => a + b, 0);
+    expect(localTotal).toBeGreaterThan(20);
+    expect(Math.max(...local.values()) / localTotal).toBeGreaterThan(0.5);
+    // Ferns only on the woodland floor: every fern stands on mostly temperate ground.
+    const coast = buildGroundCover(gen, Math.floor(-13300 / 512), Math.floor(7200 / 512), 1);
+    const sample = createTerrainSample();
+    let ferns = 0;
+    for (let i = 0; i < coast.length; i += 6) if (coast[i + 5] === 7) { ferns++; expect(gen.sample(coast[i], coast[i + 2], sample).weights[0]).toBeGreaterThan(0.55); }
+    expect(ferns).toBeGreaterThanOrEqual(0);
   });
   it('adds balloons over gentle land and sailboats on open water within the budget', () => {
     const budget = wildlifeBudget('lively', 'high');

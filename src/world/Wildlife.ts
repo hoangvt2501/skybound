@@ -327,6 +327,7 @@ export class Wildlife {
         attribute vec4 aOrbit; // radius, angular speed, start angle, bob amplitude
         attribute vec4 aReact; // reaction start time, direction x/z, mode + packed ground delta
         attribute vec4 aReact2; // intensity, alert time (+start / -end), direction toward the player x/z
+        attribute vec4 aTint;   // per-member coat tint (rgb) and w = 1 for a duck hen (brown head)
         vec3 wildRotate(vec3 v, float heading) { float c = cos(heading), s = sin(heading); return vec3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z); }
         // Shared with Wildlife.ts (memberHash, runProgress, runDelay, flockEvadeOffset).
         float wildStagger(float phase) { return fract(phase * 0.618); }
@@ -359,6 +360,9 @@ export class Wildlife {
           float tint = fract(aPhase * 0.618);
           if (tint > 0.66) vColor.rgb = vColor.rgb.brg; else if (tint > 0.33) vColor.rgb = vColor.rgb.gbr;
         }
+        // Coat tint per member; a duck hen swaps the drake's green head for mottled brown.
+        if (aTint.w > 0.5 && aMotion > 1.5 && aMotion < 2.5) vColor.rgb = vec3(0.47, 0.36, 0.25) * (0.9 + 0.2 * fract(aPhase * 0.37));
+        else vColor.rgb *= aTint.rgb;
         #endif`);
       shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
         // Alert: 0..1 while the group watches the player (rises over 0.6 s, eases off over 1.2 s).
@@ -473,7 +477,7 @@ export class Wildlife {
           }
         }`);
     };
-    material.customProgramCacheKey = () => 'skybound-wildlife-v7';
+    material.customProgramCacheKey = () => 'skybound-wildlife-v8';
     this.materials.push(material);
     const ring: THREE.InstancedMesh[] = [];
     for (let slot = 0; slot < RING; slot++) {
@@ -483,6 +487,7 @@ export class Wildlife {
       g.setAttribute('aOrbit', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4));
       g.setAttribute('aReact', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4).fill(0), 4));
       g.setAttribute('aReact2', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4).fill(0), 4));
+      g.setAttribute('aTint', new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4).fill(1), 4));
       const mesh = new THREE.InstancedMesh(g, material, capacity);
       mesh.count = 0; mesh.frustumCulled = false; mesh.visible = slot === 0;
       mesh.name = `wildlife-${kind}-${slot}`;
@@ -670,6 +675,14 @@ export class Wildlife {
         } else {
           react2.setXYZW(index, 0, 3, 0, 0);
         }
+        // Coat variety: deer from reddish to greyish brown, about half the ducks are hens, flock birds
+        // vary a little in shade. Deterministic from the encounter phase and member index.
+        const tint = mesh.geometry.attributes.aTint as THREE.InstancedBufferAttribute;
+        const hv = (((e.phase * 7.13 + j * 3.71) % 1) + 1) % 1, hv2 = (((e.phase * 3.37 + j * 5.19) % 1) + 1) % 1;
+        if (e.kind === 'deer') tint.setXYZW(index, 0.9 + 0.2 * hv, 0.9 + 0.1 * hv2, 0.86 + 0.08 * hv2, 0);
+        else if (e.kind === 'duck') { const hen = hv < 0.45; tint.setXYZW(index, hen ? 1.08 : 1, hen ? 0.98 : 1, hen ? 0.86 : 1, hen ? 1 : 0); }
+        else if (e.kind === 'bird') tint.setXYZW(index, 0.88 + 0.24 * hv, 0.88 + 0.24 * hv2, 0.88 + 0.24 * hv, 0);
+        else tint.setXYZW(index, 1, 1, 1, 0);
       }
     }
     for (const kind of KINDS) {

@@ -40,8 +40,16 @@ export const enum Species {
   Willow = 7,
   /** Boulders: placed by the same deterministic rules as trees, so they are colliders too. */
   Rock = 8,
+  /** Round autumn crown in reds and oranges (temperate woods, uplands). */
+  Maple = 9,
+  /** Tall narrow dark column (coast, uplands). */
+  Cypress = 10,
+  /** Small flowering tree with a pink crown (meadows, lake shores). */
+  Blossom = 11,
+  /** Dense blue-green conifer with drooping tiers (alpine). */
+  Fir = 12,
 }
-export const SPECIES_COUNT = 9;
+export const SPECIES_COUNT = 13;
 
 
 /** Collision radius and height (m) for a unit-scale instance of each species. */
@@ -55,4 +63,8 @@ export const SPECIES_COLLIDER: { radius: number; height: number }[] = [
   { radius: 1.4, height: 2.2 },
   { radius: 3.0, height: 8 },
   { radius: 2.6, height: 3.2 },
+  { radius: 3.0, height: 11 },
+  { radius: 1.2, height: 14 },
+  { radius: 2.6, height: 8 },
+  { radius: 2.2, height: 16 },
 ];

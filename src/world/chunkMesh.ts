@@ -331,6 +331,8 @@ export function buildVegetation(gen: WorldGen, cx: number, cz: number): Float32A
 const COVER_CELL = 7.2; // m
 const COVER_CELLS = Math.floor(CHUNK_SIZE / COVER_CELL);
 export const COVER_STRIDE = 6;
+/** Flower tiles of the ground-cover atlas: poppy, daisy, lupine, cornflower, buttercup. */
+const FLOWER_KINDS = [4, 5, 6, 9, 10];
 
 /**
  * Near-field ground cover (grass tufts, dry tufts, reeds, wildflowers): purely
@@ -359,12 +361,18 @@ export function buildGroundCover(gen: WorldGen, cx: number, cz: number, density:
       if (roll >= p) continue;
       let kind = 0;
       const flowerRoll = rng.next();
-      if (patch > 0 && flowerRoll < patch * 0.92) kind = 4 + Math.floor(rng.next() * 3);
-      else if (w[5] > 0.5) kind = 1;
+      if (patch > 0 && flowerRoll < patch * 0.92) {
+        // Patches are colour-coherent: one dominant flower per ~160 m zone with a few others mixed in.
+        const dominant = FLOWER_KINDS[Math.floor(gen.flowerKind(x, z) * FLOWER_KINDS.length) % FLOWER_KINDS.length];
+        kind = rng.next() < 0.72 ? dominant : FLOWER_KINDS[Math.floor(rng.next() * FLOWER_KINDS.length)];
+      } else if (w[0] > 0.55 && sample.hills > 0.15 && flowerRoll < 0.45) kind = 7; // ferns on the woodland floor
+      else if (w[5] > 0.5) kind = flowerRoll < 0.3 ? 8 : 1;
       else if (w[3] > 0.4 || w[2] > 0.5) kind = 2;
       else if (w[4] > 0.5) kind = 3;
-      else kind = flowerRoll < 0.5 ? 0 : 1;
-      out.push(x, h, z, (kind >= 4 ? 0.7 : 0.8) + sc * (kind >= 4 ? 0.6 : 0.9), rot * Math.PI * 2, kind);
+      else kind = flowerRoll < 0.45 ? 0 : flowerRoll < 0.8 ? 1 : 8;
+      const flower = kind >= 4 && kind <= 6 || kind >= 9;
+      const base = flower ? 0.7 : kind === 7 ? 0.9 : kind === 8 ? 1.0 : 0.8, range = flower ? 0.6 : kind === 8 ? 0.8 : 0.9;
+      out.push(x, h, z, base + sc * range, rot * Math.PI * 2, kind);
     }
   }
   return Float32Array.from(out);

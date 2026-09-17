@@ -76,8 +76,10 @@ function paintFlat(g: THREE.BufferGeometry, c: THREE.Color): THREE.BufferGeometr
  * leading edge (kept in uv for painting). The trailing edge is scalloped into
  * secondaries. One-sided; callers stack a top and an under plate.
  */
-function wingPlate(length: number, rootChord: number, tipChord: number, sweep: number, camber: number, scallops: number, lift: number): THREE.BufferGeometry {
-  const g = new THREE.PlaneGeometry(1, 1, 10, 4);
+function wingPlate(length: number, rootChord: number, tipChord: number, sweep: number, camber: number, scallops: number, lift: number, overlap = 0): THREE.BufferGeometry {
+  // `overlap` extends the root back past the hinge so the plate slides under the previous segment
+  // and no gap opens as the wing folds or beats.
+  const g = new THREE.PlaneGeometry(1, 1, 14, 6);
   const pos = g.attributes.position, uv = g.attributes.uv;
   for (let i = 0; i < pos.count; i++) {
     const t = pos.getX(i) + 0.5, u = pos.getY(i) + 0.5;
@@ -85,7 +87,7 @@ function wingPlate(length: number, rootChord: number, tipChord: number, sweep: n
     const scallop = scallops > 0 ? Math.pow(u, 4) * Math.abs(Math.sin(t * Math.PI * scallops)) * chord * 0.16 : 0;
     const z = (u - 0.3) * chord + sweep * t + scallop + (rootChord - chord) * 0.2;
     const y = camber * chord * Math.sin(Math.PI * u) + lift;
-    pos.setXYZ(i, t * length, y, z);
+    pos.setXYZ(i, t * (length + overlap) - overlap, y, z);
     uv.setXY(i, t, u);
   }
   pos.needsUpdate = true;
@@ -95,7 +97,7 @@ function wingPlate(length: number, rootChord: number, tipChord: number, sweep: n
 
 /** Rounded, tapered feather along +X: width `w`, elliptical tip over the last 45 %. */
 function featherPlate(length: number, w: number, lift = 0): THREE.BufferGeometry {
-  const g = new THREE.PlaneGeometry(1, 1, 8, 2);
+  const g = new THREE.PlaneGeometry(1, 1, 10, 3);
   const pos = g.attributes.position, uv = g.attributes.uv;
   for (let i = 0; i < pos.count; i++) {
     const t = pos.getX(i) + 0.5, v = pos.getY(i);
@@ -110,7 +112,7 @@ function featherPlate(length: number, w: number, lift = 0): THREE.BufferGeometry
 
 /** Cone beak pointing -Z with a downward hook. */
 function beakGeometry(length: number, radius: number, hook: number, c: THREE.Color): THREE.BufferGeometry {
-  const g = new THREE.ConeGeometry(radius, length, 10, 3);
+  const g = new THREE.ConeGeometry(radius, length, 16, 4);
   g.rotateX(-Math.PI / 2); // tip toward -Z
   g.translate(0, 0, -length / 2);
   const pos = g.attributes.position;
@@ -125,11 +127,13 @@ function beakGeometry(length: number, radius: number, hook: number, c: THREE.Col
 
 /** Body + neck as one lathe along Z (narrow neck end toward -Z). */
 function bodyGeometry(): THREE.BufferGeometry {
+  // A denser profile and 40 segments around: the body reads as a smooth teardrop, not a faceted tube.
   const profile: [number, number][] = [
-    [0.02, -0.56], [0.06, -0.5], [0.11, -0.42], [0.155, -0.3], [0.17, -0.14], [0.165, 0.02], [0.14, 0.18], [0.1, 0.32], [0.06, 0.42], [0.025, 0.5], [0.005, 0.54],
+    [0.02, -0.56], [0.06, -0.5], [0.09, -0.46], [0.11, -0.42], [0.135, -0.36], [0.155, -0.3], [0.165, -0.22], [0.17, -0.14], [0.17, -0.06], [0.165, 0.02],
+    [0.155, 0.1], [0.14, 0.18], [0.12, 0.25], [0.1, 0.32], [0.08, 0.37], [0.06, 0.42], [0.04, 0.46], [0.025, 0.5], [0.005, 0.54],
   ];
   // Lathe revolves (x = radius, y = axis) around Y; rotate so the axis lies along Z.
-  const g = new THREE.LatheGeometry(profile.map(([r, z]) => new THREE.Vector2(r, z)), 22);
+  const g = new THREE.LatheGeometry(profile.map(([r, z]) => new THREE.Vector2(r, z)), 40);
   g.rotateX(Math.PI / 2); // (x, y, z) -> (x, -z, y): profile y (our z) lands on +Z
   const pos = g.attributes.position;
   for (let i = 0; i < pos.count; i++) {
@@ -214,8 +218,9 @@ export class BirdModel {
     paintTwoTone(bodyGeo, COL_BACK, COL_BELLY, (i, c, pos) => {
       const z = pos.getZ(i), y = pos.getY(i);
       if (species === 'swallow' && z < -0.32 && y < 0.05) c.lerp(COL_FACE, 0.75); // rusty throat
-      if (species === 'gull' && z < -0.3) c.lerp(COL_BELLY, 0.7); // white neck
-      if (species === 'eagle' && z < -0.4) c.lerp(COL_FACE, 0.8); // white neck into the head
+      // Species marks with a crisp but anti-aliased edge (a two-centimetre blend), not a soft wash.
+      if (species === 'gull') c.lerp(COL_BELLY, 0.85 * (1 - THREE.MathUtils.smoothstep(z, -0.34, -0.26))); // white neck
+      if (species === 'eagle') c.lerp(COL_FACE, 0.96 * (1 - THREE.MathUtils.smoothstep(z, -0.44, -0.37))); // white hood into the head
     });
     this.body = mesh(bodyGeo);
     this.body.scale.setScalar(style.body);
@@ -224,7 +229,7 @@ export class BirdModel {
     // Head.
     this.head = new THREE.Group();
     this.head.position.set(0, 0.075 * style.body, -0.5 * style.body);
-    const headGeo = new THREE.SphereGeometry(0.115, 18, 14);
+    const headGeo = new THREE.SphereGeometry(0.115, 28, 20);
     headGeo.scale(1, 0.94, 1.12);
     paintTwoTone(headGeo, species === 'swallow' ? COL_BACK : COL_FACE, species === 'swallow' ? COL_FACE : COL_FACE.clone().lerp(COL_BELLY, 0.3), (i, c, pos) => {
       if (species === 'swallow' && pos.getY(i) > 0.02) c.copy(COL_BACK); // blue crown, rust face
@@ -286,13 +291,19 @@ export class BirdModel {
         const hinge = new THREE.Group();
         hinge.position.set(px, py, pz);
         const outer = i === 2;
-        const top = mesh(paintByUv(wingPlate(s.len, s.root, s.tip, s.sweep, s.camber, s.scallops, 0.006), topPaint(outer)));
-        const under = mesh(paintByUv(wingPlate(s.len, s.root, s.tip, s.sweep, s.camber, s.scallops, -0.006), underPaint));
-        if (side < 0) { top.scale.x = -1; under.scale.x = -1; }
-        hinge.add(top, under);
+        const overlap = i === 0 ? 0.04 * style.body : 0.09;
+        const top = mesh(paintByUv(wingPlate(s.len, s.root, s.tip, s.sweep, s.camber, s.scallops, 0.006, overlap), topPaint(outer)));
+        const under = mesh(paintByUv(wingPlate(s.len, s.root, s.tip, s.sweep, s.camber, s.scallops, -0.006, overlap), underPaint));
+        // Coverts: a shorter scalloped row over the leading half of the top surface, a shade darker,
+        // so the wing shows feather rows rather than one flat plate.
+        const covertGeo = wingPlate(s.len * 0.97, s.root * 0.52, s.tip * 0.55, s.sweep * 0.5, s.camber * 0.9, outer ? 4 : 5, 0.012, overlap);
+        covertGeo.translate(0, 0, -0.14 * s.root);
+        const coverts = mesh(paintByUv(covertGeo, (t, u, c) => { topPaint(outer)(t, u, c); c.multiplyScalar(0.84 + 0.1 * u); if (u > 0.85) c.multiplyScalar(0.9); }));
+        if (side < 0) { top.scale.x = -1; under.scale.x = -1; coverts.scale.x = -1; }
+        hinge.add(top, under, coverts);
         // A flattened ellipsoid at the joint hides the seam between segments as they flex.
-        const joint = mesh(paintTwoTone(new THREE.SphereGeometry(1, 10, 7), COL_WING, COL_UNDER));
-        joint.scale.set(0.05 * style.chord + 0.02, 0.014, s.root * 0.42);
+        const joint = mesh(paintTwoTone(new THREE.SphereGeometry(1, 14, 9), COL_WING, COL_UNDER));
+        joint.scale.set(0.07 * style.chord + 0.03, 0.02, s.root * 0.5);
         joint.position.set(0, 0, s.root * 0.2 + (i === 0 ? 0.02 : 0));
         hinge.add(joint);
         if (outer) {

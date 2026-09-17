@@ -307,11 +307,16 @@ export class Clouds {
     const rng = new Rng(h);
     const x = (cx + 0.15 + rng.next() * 0.7) * CELL;
     const z = (cz + 0.15 + rng.next() * 0.7) * CELL;
-    const y = this.altitudes[0] + (rng.next() - 0.3) * 260;
-    const rx = 260 + rng.next() * 420;
+    // Three kinds of cloud: small fair-weather puffs, the usual mid-size cumulus, and the occasional
+    // big towering mass, so the sky is not one size of cloud repeated.
+    const archetype = rng.next();
+    const big = archetype > 0.85, small = archetype < 0.42;
+    const y = this.altitudes[0] + (rng.next() - 0.3) * 260 - (big ? 60 : 0);
+    const rx = small ? 170 + rng.next() * 160 : big ? 380 + rng.next() * 260 : 260 + rng.next() * 420;
     const rz = rx * (0.7 + rng.next() * 0.5);
-    const ry = 90 + rng.next() * 110;
-    const count = 9 + rng.int(9);
+    const ry = small ? 55 + rng.next() * 40 : big ? 170 + rng.next() * 90 : 90 + rng.next() * 110;
+    const count = small ? 5 + rng.int(5) : big ? 15 + rng.int(9) : 9 + rng.int(9);
+    const sizeBase = small ? 95 : big ? 190 : 150, sizeRange = small ? 80 : big ? 150 : 190;
     const puffs: Puff[] = [];
     for (let i = 0; i < count; i++) {
       // Ellipsoid distribution with a flatter bottom.
@@ -320,7 +325,7 @@ export class Clouds {
       const ox = Math.cos(a) * rr * rx, oz = Math.sin(a) * rr * rz;
       const t = rng.next();
       const oy = (t * t * 1.35 - 0.3) * ry * (1 - rr * 0.5);
-      const size = (150 + rng.next() * 190) * (1 - rr * 0.35) * (0.8 + 0.4 * (oy / ry + 0.3));
+      const size = (sizeBase + rng.next() * sizeRange) * (1 - rr * 0.35) * (0.8 + 0.4 * (oy / ry + 0.3));
       puffs.push({ ox, oy, oz, size, light: 0, variant: rng.int(SPRITES) + rng.next() * 0.999, rot: rng.next() });
     }
     const mass: CloudMass = { key, x, y, z, puffs, seed: h };

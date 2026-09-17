@@ -8,6 +8,7 @@ import { AudioSystem } from '../atmosphere/Audio';
 import { Clouds } from '../atmosphere/Clouds';
 import { DayCycle } from '../atmosphere/DayCycle';
 import { Sky } from '../atmosphere/Sky';
+import { ValleyStream } from '../atmosphere/Stream';
 import { WaterMaterial } from '../atmosphere/WaterMaterial';
 import { Autopilot } from '../flight/Autopilot';
 import { BIRD_SPECIES } from '../flight/BirdSpecies';
@@ -64,6 +65,7 @@ type Phase = 'loading' | 'start' | 'flying' | 'paused' | 'photo';
 const _v = new THREE.Vector3();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 const _hazeTint = new THREE.Color();
+const _skyMix = new THREE.Color();
 /** Lowest adaptive render scale; below this the blur costs more than a few missed refreshes. */
 const MIN_RENDER_SCALE = 0.7;
 
@@ -92,6 +94,7 @@ export class App {
   private wildlife: Wildlife;
   private splash: SplashEffects;
   private shafts: LightShafts;
+  private stream: ValleyStream;
   private photoPanel: PhotoPanel;
   private photoHideBird = false;
   private lastPhotoBytes = 0;
@@ -289,6 +292,8 @@ export class App {
     this.clouds.setBudget(this.quality.cloudPuffs);
     this.clouds.visible = this.quality.clouds;
     this.scene.add(this.clouds.group);
+    this.stream = new ValleyStream(this.gen);
+    this.scene.add(this.stream.group);
     this.sun = new THREE.DirectionalLight(0xffffff, 2);
     this.sun.castShadow = this.quality.shadows;
     this.sun.shadow.mapSize.set(this.settings.quality === 'high' ? 2048 : 1024, this.settings.quality === 'high' ? 2048 : 1024);
@@ -630,6 +635,7 @@ export class App {
       this.audio.update(dt, this.flight.state.speed, this.flight.state.flapping, this.flight.state.boosting, (this.flight.state.boosting ? 1.35 : 1) * BIRD_SPECIES[this.settings.birdSpecies].beat, {
         exposure: this.waterExposureAt(this.flight.state.x, this.flight.state.z), wet: this.flight.state.wet,
         aboveGround: this.flight.state.y - this.chunks.surfaceAt(this.flight.state.x, this.flight.state.z),
+        cascade: this.stream.fall ? 1 - THREE.MathUtils.smoothstep(Math.hypot(this.flight.state.x - this.stream.fall.x, this.flight.state.y - this.stream.fall.baseY, this.flight.state.z - this.stream.fall.z), 50, 280) : 0,
         water: this.chunks.heightAt(this.flight.state.x, this.flight.state.z) < SEA_LEVEL,
         daylight: Math.max(0, Math.sin((this.day.time - 0.25) * Math.PI * 2)),
         resting: perched,
@@ -876,6 +882,8 @@ export class App {
     this.fog.color.copy(pal.fog);
     this.renderer.setClearColor(pal.fog);
     this.sky.update(this.camera.position, pal, this.day.sunDir, this.day.moonDir, this.simTime);
+    this.stream.update(this.simTime, this.origin.value.x, this.origin.value.z, _skyMix.copy(pal.horizon).lerp(pal.zenith, 0.5), THREE.MathUtils.lerp(0.35, 1, pal.daylight));
+    if (this.stream.fall) this.clouds.setStaticOpacity('fall', 0.55 * (0.5 + 0.5 * pal.daylight));
     if (this.quality.clouds) this.clouds.update(this.camera.position, this.origin.value.x, this.origin.value.z, this.simTime, this.day.sunDir, pal.sunColor, pal.daylight, pal.fog);
     const wu = this.waterMat.uniforms;
     wu.uTime.value = this.simTime;
@@ -1101,6 +1109,13 @@ export class App {
       if (i % 2 === 0) anchors.push({ x: p.x + (rng.next() - 0.5) * 200, y: floor + 40, z: p.z + (rng.next() - 0.5) * 200, length: 380 + rng.next() * 160, width: 50 + rng.next() * 70, seed: rng.next() });
     }
     this.shafts.setAnchors(anchors);
+    // Spray at the foot of the waterfall: a few small puffs that hang over the pool.
+    const fall = this.stream.fall;
+    if (fall) {
+      const puffs = [];
+      for (let k = 0; k < 7; k++) puffs.push({ ox: (rng.next() - 0.5) * 16, oy: 2 + rng.next() * 12 + k * 1.5, oz: (rng.next() - 0.5) * 16, size: 18 + rng.next() * 14 });
+      this.clouds.addStaticMass('fall', fall.x, fall.baseY + 4, fall.z, puffs, this.seed ^ 0x4a11);
+    }
   }
 
   /** Mist is thickest at dawn, burns off by midday and gathers again toward dusk. */

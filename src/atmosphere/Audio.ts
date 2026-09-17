@@ -2,7 +2,7 @@
 import { MusicBox, type MusicStyle } from './Music';
 
 export interface SoundMix { ambienceVolume: number; musicVolume: number; effectsVolume: number }
-export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number; /** 0 sheltered lake .. 1 open sea, for surf loudness */ exposure?: number; /** 0..1 while touching or dripping */ wet?: number; /** sitting on a perch: a leafy breeze and busier songbirds instead of airflow */ resting?: boolean }
+export interface SoundEnvironment { aboveGround: number; water: boolean; daylight: number; /** 0 sheltered lake .. 1 open sea, for surf loudness */ exposure?: number; /** 0..1 while touching or dripping */ wet?: number; /** sitting on a perch: a leafy breeze and busier songbirds instead of airflow */ resting?: boolean; /** 0..1 nearness to the waterfall: a bright constant rush */ cascade?: number }
 const clamp = (v: number) => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
 
 /** Total wind level for a speed; the two layers below split it by timbre. */
@@ -180,9 +180,11 @@ export class AudioSystem {
     this.rushGain.gain.setTargetAtTime(total * (0.15 + 0.85 * amount * amount) * (boosting ? 1.4 : 0.9), t, 0.7);
     const near = 1 - clamp(environment.aboveGround / 200);
     // Surf swells with exposure: open sea is louder and brighter than a sheltered lake.
-    const exposure = clamp(environment.exposure ?? 0);
-    this.waterGain?.gain.setTargetAtTime(environment.water ? near * (0.06 + 0.07 * exposure + Math.sin(t * 0.35) * (0.012 + 0.02 * exposure)) : 0, t, 2);
-    this.waterFilter?.frequency.setTargetAtTime(950 + 900 * exposure, t, 2);
+    const exposure = clamp(environment.exposure ?? 0), cascade = clamp(environment.cascade ?? 0);
+    // The waterfall shares the water bus: a steadier, brighter rush that swells as the bird nears it.
+    const surf = environment.water ? near * (0.06 + 0.07 * exposure + Math.sin(t * 0.35) * (0.012 + 0.02 * exposure)) : 0;
+    this.waterGain?.gain.setTargetAtTime(Math.max(surf, 0.13 * cascade * cascade), t, cascade > surf ? 0.8 : 2);
+    this.waterFilter?.frequency.setTargetAtTime(cascade * cascade > surf ? 1500 : 950 + 900 * exposure, t, 2);
     this.skimGain?.gain.setTargetAtTime(0.09 * clamp(environment.wet ?? 0) * clamp(speed / 30), t, 0.08);
     if (this.varioGain && this.varioOsc && this.varioLfo && this.varioLfoGain) {
       const lv = this.liftLevel < 0.12 ? 0 : this.liftLevel;

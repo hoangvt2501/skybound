@@ -45,6 +45,7 @@ const VEG_VERTEX_HEAD = /* glsl */ `
 
   attribute vec2 aVeg;      // x: sway weight (0 base .. 1 crown top), y: crown mask
   attribute float aRand;    // per-instance random 0..1
+  attribute vec3 aTint;     // per-instance crown tint (see speciesTint)
   uniform float uTime;
   uniform vec2 uWind;
   uniform float uWindStrength;
@@ -116,13 +117,14 @@ export class VegetationMaterial extends THREE.MeshLambertMaterial {
         .replace('#include <common>', `#include <common>\n${VEG_VERTEX_HEAD}`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>\n${VEG_VERTEX_BODY}`)
         // Grounding: the lowest 2 m of every model (trunk foot, boulder base) darken toward the ground.
-        .replace('#include <color_vertex>', `#include <color_vertex>\n  vColor.rgb *= 0.72 + 0.28 * smoothstep(0.0, 2.2, position.y);`);
+        // Tint: the per-instance crown colour (autumn, blossom shade, conifer hue) applies to crown vertices.
+        .replace('#include <color_vertex>', `#include <color_vertex>\n  vColor.rgb *= (0.72 + 0.28 * smoothstep(0.0, 2.2, position.y)) * mix(vec3(1.0), aTint, aVeg.y);`);
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}`)
         .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`)
         .replace('#include <fog_fragment>', `${AERIAL_FRAGMENT}\n#include <fog_fragment>`);
     };
-    this.customProgramCacheKey = () => `skybound-veg-v4-${this.dissolve ? 'd' : 's'}`;
+    this.customProgramCacheKey = () => `skybound-veg-v5-${this.dissolve ? 'd' : 's'}`;
   }
 }
 
@@ -154,6 +156,8 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
           `#include <common>
           attribute float aTile;
           attribute float aRand;
+          attribute vec3 aTint;
+          varying vec3 vTint;
   attribute vec2 aLife;     // x: birth time, y: death time (1e9 = alive)
   varying float vLifeFade;
           uniform float uLifeTime;
@@ -193,11 +197,13 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
             float phase = aRand * 6.28 + ip.x * 0.05 + ip.z * 0.07;
             float g = sin(uTime * 1.3 + phase) * 0.7 + sin(uTime * 3.1 + phase * 1.7) * 0.3;
             transformed.xz += uWind * g * uSway * position.y * position.y;
+            vTint = aTint;
           }`,
         );
       shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}`)
+        .replace('#include <common>', `#include <common>${DISSOLVE_FRAG}\n  varying vec3 vTint;`)
         .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>${this.dissolve ? DISSOLVE_TEST : ''}`)
+        .replace('#include <color_fragment>', `#include <color_fragment>\n  diffuseColor.rgb *= vTint;`)
         .replace('#include <fog_fragment>', `${AERIAL_IMPOSTOR}\n#include <fog_fragment>`);
       // Billboards are lit as if facing up, on both sides (no back-face darkening).
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -207,7 +213,7 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
         nonPerturbedNormal = normal;`,
       );
     };
-    this.customProgramCacheKey = () => `skybound-bb4-${tiles}-${sway}-${this.dissolve ? 'd' : 's'}`;
+    this.customProgramCacheKey = () => `skybound-bb5-${tiles}-${sway}-${this.dissolve ? 'd' : 's'}`;
   }
 }
 
@@ -217,17 +223,32 @@ class BillboardMaterial extends THREE.MeshLambertMaterial {
 
 const _c = new THREE.Color();
 
-/** Two-tone paint by normal.y (lit top, shaded underside) with per-vertex variation. */
-function paintCrown(g: THREE.BufferGeometry, top: string, under: string, rng: Rng, vary = 0.08): THREE.BufferGeometry {
+/**
+ * Geometry detail of the builders: 320-face leaf clusters (icosahedron detail 2) and 12-sided conifer
+ * tiers. Crowns use fewer, larger clusters than the old 80-face set did, so a tree costs about twice
+ * the triangles of before rather than four times.
+ */
+const CLUSTER_DETAIL = 1;
+const TIER_SEGMENTS = 10;
+
+/**
+ * Two-tone paint by normal.y (lit top, shaded underside) with a smooth lift toward the top of the
+ * piece (sunlit outer leaves) and only a little per-vertex variation, so crowns read as soft
+ * rounded masses rather than speckled facets.
+ */
+function paintCrown(g: THREE.BufferGeometry, top: string, under: string, rng: Rng, vary = 0.04): THREE.BufferGeometry {
   const ct = new THREE.Color(top), cu = new THREE.Color(under);
   if (!g.attributes.normal) g.computeVertexNormals();
   const pos = g.attributes.position;
   const nrm = g.attributes.normal;
+  g.computeBoundingBox();
+  const y0 = g.boundingBox!.min.y, y1 = g.boundingBox!.max.y, span = Math.max(1e-3, y1 - y0);
   const colors = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
     const t = THREE.MathUtils.clamp(nrm.getY(i) * 0.6 + 0.5, 0, 1);
+    const up = (pos.getY(i) - y0) / span;
     _c.copy(cu).lerp(ct, t);
-    const v = 1 + (rng.next() - 0.5) * vary;
+    const v = (1 + (rng.next() - 0.5) * vary) * (0.94 + 0.12 * up);
     colors[i * 3] = _c.r * v;
     colors[i * 3 + 1] = _c.g * v;
     colors[i * 3 + 2] = _c.b * v;
@@ -272,11 +293,12 @@ function place(g: THREE.BufferGeometry, x: number, y: number, z: number, rx = 0,
 }
 
 /** Leaf cluster: icosphere with deterministic vertex displacement, squashed. */
-function leafCluster(radius: number, top: string, under: string, rng: Rng, squash = 0.8, rough = 0.16): THREE.BufferGeometry {
+function leafCluster(radius: number, top: string, under: string, rng: Rng, squash = 0.8, rough = 0.13): THREE.BufferGeometry {
   // Merge the icosphere's duplicated vertices (by position only, so seams and
   // per-face normals do not block merging) so displaced normals stay smooth;
-  // displacement is smooth noise (lumps), not per-vertex white noise.
-  const raw = new THREE.IcosahedronGeometry(radius, 1);
+  // displacement is smooth noise (lumps), not per-vertex white noise. Detail 2
+  // (320 faces) keeps the silhouette round; the lumps come from the low octave.
+  const raw = new THREE.IcosahedronGeometry(radius, CLUSTER_DETAIL);
   raw.deleteAttribute('uv');
   raw.deleteAttribute('normal');
   const g = mergeVertices(raw);
@@ -285,7 +307,7 @@ function leafCluster(radius: number, top: string, under: string, rng: Rng, squas
   const ox = rng.next() * 10, oz = rng.next() * 10;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-    const n = noise.noise(x * 0.9 + ox + y * 0.35, z * 0.9 + oz - y * 0.25) + 0.45 * noise.noise(x * 2.2 - oz, z * 2.2 + y * 1.1 + ox);
+    const n = noise.noise(x * 0.7 + ox + y * 0.3, z * 0.7 + oz - y * 0.2) + 0.3 * noise.noise(x * 1.6 - oz, z * 1.6 + y * 0.9 + ox);
     const k = 1 + n * rough;
     pos.setXYZ(i, x * k, y * k * squash, z * k);
   }
@@ -296,7 +318,7 @@ function leafCluster(radius: number, top: string, under: string, rng: Rng, squas
 
 /** Irregular conifer tier: cone with jittered rim and a slight droop. */
 function tier(radius: number, height: number, color: string, rng: Rng): THREE.BufferGeometry {
-  const raw = new THREE.ConeGeometry(radius, height, 9, 2, true);
+  const raw = new THREE.ConeGeometry(radius, height, TIER_SEGMENTS, 2, true);
   raw.deleteAttribute('uv');
   raw.deleteAttribute('normal');
   const g = mergeVertices(raw);
@@ -598,19 +620,191 @@ function boulder(seed: number): THREE.BufferGeometry {
   return merge(parts);
 }
 
-const BUILDERS: ((seed: number) => THREE.BufferGeometry)[] = [oak, pine, birch, palm, cactus, deadwood, shrub, willow, boulder];
+function maple(seed: number): THREE.BufferGeometry {
+  const rng = new Rng(seed);
+  const height = 10 + rng.next() * 2;
+  const bark = '#4f3a2b';
+  const parts = trunk(4.2 + rng.next() * 0.8, 0.42, 0.24, 0.02 + rng.next() * 0.03, bark, rng);
+  const top = 4 + rng.next() * 0.6;
+  const nBranches = 4 + rng.int(2);
+  for (let i = 0; i < nBranches; i++) {
+    const yaw = (i / nBranches) * Math.PI * 2 + rng.next() * 0.7;
+    parts.push(branch(0, top - 1 + rng.next() * 0.8, 0, 2.2 + rng.next() * 1.2, 0.16, yaw, 0.5 + rng.next() * 0.5, bark, rng, height));
+  }
+  // Autumn crown: every cluster its own red, orange or gold; the per-instance tint spreads the range.
+  const tops = ['#c8472e', '#d9622f', '#e08a2e', '#c93b3b', '#e0a036', '#d4562a'];
+  const unders = ['#8a2f1e', '#9a4a20', '#7d3319'];
+  const n = 4 + rng.int(2);
+  const cy = top + 1.4;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + rng.next() * 0.8;
+    const rad = 0.8 + rng.next() * 1.8;
+    const r = 1.5 + rng.next() * 1.0;
+    const g = leafCluster(r, tops[rng.int(tops.length)], unders[rng.int(unders.length)], rng, 0.75 + rng.next() * 0.2, 0.14);
+    tag(g, 1, height);
+    place(g, Math.cos(a) * rad, cy + (rng.next() - 0.3) * 1.4 + r * 0.3, Math.sin(a) * rad, 0, rng.next() * 3, 0);
+    parts.push(g);
+  }
+  const crownTop = leafCluster(2.0 + rng.next() * 0.5, tops[2], unders[1], rng, 0.8, 0.14);
+  tag(crownTop, 1, height);
+  place(crownTop, (rng.next() - 0.5) * 1.0, cy + 2.2, (rng.next() - 0.5) * 1.0);
+  parts.push(crownTop);
+  return merge(parts);
+}
+
+function cypress(seed: number): THREE.BufferGeometry {
+  const rng = new Rng(seed);
+  const height = 12 + rng.next() * 3;
+  const parts = trunk(2.2, 0.28, 0.18, 0.01, '#4a3828', rng, 3);
+  const greens = ['#2e5b34', '#35673b', '#2a5330', '#3a6f40'];
+  // A column of tall, slightly offset clusters that taper to a point.
+  let y = 1.6, r = 1.25 + rng.next() * 0.3;
+  const n = 4, step = (height - 1.6) / n;
+  for (let i = 0; i < n; i++) {
+    const g = leafCluster(r, greens[rng.int(greens.length)], '#1e3f24', rng, (step * 0.85) / r, 0.11);
+    tag(g, 1, height);
+    place(g, (rng.next() - 0.5) * 0.2, y + step * 0.45, (rng.next() - 0.5) * 0.2, 0, rng.next() * 3, 0);
+    parts.push(g);
+    y += step * 0.82;
+    r *= 0.86;
+  }
+  const tip = leafCluster(0.45, '#3a6f40', '#1e3f24', rng, 2.2, 0.1);
+  tag(tip, 1, height);
+  place(tip, 0, y + 0.5, 0);
+  parts.push(tip);
+  return merge(parts);
+}
+
+function blossom(seed: number): THREE.BufferGeometry {
+  const rng = new Rng(seed);
+  const height = 7 + rng.next() * 1.5;
+  const bark = '#5a4034';
+  const parts = trunk(2.8 + rng.next() * 0.5, 0.3, 0.18, 0.03 + rng.next() * 0.04, bark, rng, 4);
+  const top = 2.6 + rng.next() * 0.5;
+  const nBranches = 3 + rng.int(2);
+  for (let i = 0; i < nBranches; i++) {
+    const yaw = (i / nBranches) * Math.PI * 2 + rng.next() * 0.8;
+    parts.push(branch(0, top - 0.6 + rng.next() * 0.6, 0, 1.8 + rng.next(), 0.12, yaw, 0.7 + rng.next() * 0.5, bark, rng, height));
+  }
+  const tops = ['#f2a9c4', '#f7c6d9', '#eb8fb0', '#f9d7e3', '#f4b8cf'];
+  const unders = ['#c76f95', '#d98fb0', '#b8608a'];
+  const n = 4 + rng.int(2), cy = top + 1.2;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 + rng.next() * 0.8;
+    const rad = 0.6 + rng.next() * 1.4;
+    const r = 1.2 + rng.next() * 0.7;
+    const g = leafCluster(r, tops[rng.int(tops.length)], unders[rng.int(unders.length)], rng, 0.7 + rng.next() * 0.2, 0.14);
+    tag(g, 1, height);
+    place(g, Math.cos(a) * rad, cy + (rng.next() - 0.3) * 1.2 + r * 0.3, Math.sin(a) * rad, 0, rng.next() * 3, 0);
+    parts.push(g);
+  }
+  const crownTop = leafCluster(1.6 + rng.next() * 0.3, tops[1], unders[1], rng, 0.75, 0.14);
+  tag(crownTop, 1, height);
+  place(crownTop, (rng.next() - 0.5) * 0.8, cy + 1.8, (rng.next() - 0.5) * 0.8);
+  parts.push(crownTop);
+  return merge(parts);
+}
+
+function fir(seed: number): THREE.BufferGeometry {
+  const rng = new Rng(seed);
+  const height = 14 + rng.next() * 3;
+  const parts = trunk(height * 0.45, 0.34, 0.12, 0.01, '#4b3627', rng, 4);
+  const tiers = 6 + rng.int(2);
+  const colors = ['#28553a', '#2f6242', '#254d36', '#2b5b3d'];
+  let y = 1.8 + rng.next() * 0.6;
+  let r = 2.4 + rng.next() * 0.7;
+  const step = (height - y) / tiers;
+  for (let i = 0; i < tiers; i++) {
+    const h = step * 1.7 + rng.next() * 0.5;
+    const g = tier(r * (0.92 + rng.next() * 0.16), h, colors[rng.int(colors.length)], rng);
+    tag(g, 1, height);
+    place(g, (rng.next() - 0.5) * 0.25, y + h * 0.3, (rng.next() - 0.5) * 0.25, (rng.next() - 0.5) * 0.1, rng.next() * 6, (rng.next() - 0.5) * 0.1);
+    parts.push(g);
+    y += step;
+    r *= 0.8 + rng.next() * 0.05;
+  }
+  const tipRaw = new THREE.ConeGeometry(0.4, 2.0, 6, 1, true);
+  tipRaw.deleteAttribute('uv');
+  tipRaw.deleteAttribute('normal');
+  const tip = paintCrown(mergeVertices(tipRaw), '#336b45', '#1f3f27', rng);
+  tag(tip, 1, height);
+  place(tip, 0, y + 0.5, 0);
+  parts.push(tip);
+  return merge(parts);
+}
+
+const BUILDERS: ((seed: number) => THREE.BufferGeometry)[] = [oak, pine, birch, palm, cactus, deadwood, shrub, willow, boulder, maple, cypress, blossom, fir];
+
+/** Smooth 0..1 value noise from the position hash (bilinear), for regional colour zones. */
+function zoneNoise(x: number, z: number, scale: number, salt: number): number {
+  const u = x / scale, v = z / scale, i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j;
+  const su = fu * fu * (3 - 2 * fu), sv = fv * fv * (3 - 2 * fv);
+  const h = (a: number, b: number) => hash2(a, b, salt) / 4294967296;
+  const top = h(i, j) + (h(i + 1, j) - h(i, j)) * su, bottom = h(i, j + 1) + (h(i + 1, j + 1) - h(i, j + 1)) * su;
+  return top + (bottom - top) * sv;
+}
+const sstep = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+/**
+ * Per-instance crown tint (multiplied into the crown colours of full trees and impostors): a little
+ * lightness variation for every tree, and regional colour zones about 400 m across where some of the
+ * deciduous trees turn yellow and red, maples run from gold to deep red, blossom trees from white
+ * to rose and conifers from yellow-green to blue-green. Deterministic from the position.
+ */
+export function speciesTint(species: number, x: number, z: number, out: Float32Array, o: number): void {
+  const r1 = hash2(Math.round(x * 2), Math.round(z * 2), 4421) / 4294967296;
+  const r2 = hash2(Math.round(x * 2), Math.round(z * 2), 4423) / 4294967296;
+  const light = 0.92 + r1 * 0.16;
+  let r = light, g = light, b = light;
+  switch (species) {
+    case Species.Oak: case Species.Birch: case Species.Willow: case Species.Shrub: {
+      const autumn = sstep(0.6, 0.85, zoneNoise(x, z, 420, 811)) * (0.35 + 0.65 * r2);
+      r *= 1 + 0.32 * autumn; g *= 1 - 0.04 * autumn; b *= 1 - 0.5 * autumn;
+      break;
+    }
+    case Species.Maple: r *= lerp(1.12, 0.95, r2); g *= lerp(1.1, 0.62, r2); b *= lerp(0.75, 0.55, r2); break;
+    case Species.Blossom: r *= lerp(1.06, 0.98, r2); g *= lerp(1.04, 0.78, r2); b *= lerp(1.02, 0.9, r2); break;
+    case Species.Pine: case Species.Fir: case Species.Cypress: r *= 0.96 + 0.08 * r2; b *= 0.94 + 0.16 * (1 - r2); break;
+    default: break;
+  }
+  out[o] = r; out[o + 1] = g; out[o + 2] = b;
+}
+
+/**
+ * Ground-cover tint per tuft: grass yellows in dry zones and varies a little tuft to tuft; each flower
+ * kind spans a few hues (poppies red to orange, daisies white to cream, lupines violet to blue...).
+ */
+export function coverTint(kind: number, x: number, z: number, out: Float32Array, o: number): void {
+  const r1 = hash2(Math.round(x * 2), Math.round(z * 2), 4431) / 4294967296;
+  const light = 0.9 + r1 * 0.2;
+  let r = light, g = light, b = light;
+  if (kind <= 3 || kind === 7 || kind === 8) {
+    const dry = sstep(0.55, 0.85, zoneNoise(x, z, 260, 813));
+    r *= 1 + 0.1 * dry; g *= 1 - 0.02 * dry; b *= 1 - 0.3 * dry;
+  } else {
+    const k = r1;
+    if (kind === 4) { g *= lerp(0.85, 1.25, k); }                       // poppy: red -> orange
+    else if (kind === 5) { g *= lerp(0.95, 1.02, k); b *= lerp(0.85, 1.0, k); } // daisy: cream -> white
+    else if (kind === 6) { r *= lerp(0.8, 1.1, k); b *= lerp(1.05, 0.95, k); } // lupine: blue -> violet
+    else if (kind === 9) { r *= lerp(0.85, 1.15, k); g *= lerp(0.9, 1.05, k); } // cornflower: blue -> lilac
+    else if (kind === 10) { r *= lerp(0.95, 1.05, k); g *= lerp(0.8, 1.05, k); } // buttercup: orange -> yellow
+  }
+  out[o] = r; out[o + 1] = g; out[o + 2] = b;
+}
 
 /** Build one species geometry (pure; no DOM). Exported for tests and tools. */
 // ---------------------------------------------------------------------------
 // Impostor atlas & ground cover textures (procedural canvas)
 // ---------------------------------------------------------------------------
 
-export const IMPOSTOR_TILES = 9;
+export const IMPOSTOR_TILES = 13;
 const TILE_W = 128, TILE_H = 192;
 
 /** Visual size (m) of a unit-scale impostor per species: [width, height]. */
 export const IMPOSTOR_SIZE: [number, number][] = [
   [9, 12], [6.5, 15], [5.5, 11], [7, 10], [2.2, 4.5], [4, 6], [3, 2.2], [7.5, 8], [5.5, 3.6],
+  [8, 11], [2.6, 13], [5, 7.5], [5.5, 16],
 ];
 
 function paintImpostorAtlas(): THREE.CanvasTexture {
@@ -684,6 +878,28 @@ function paintImpostorAtlas(): THREE.CanvasTexture {
         blob(cx, 88, 40, '#86ad52'); ctx.strokeStyle = '#7fa64d'; ctx.lineWidth = 5;
         for (let i = 0; i < 10; i++) { const x = cx - 44 + i * 10; ctx.beginPath(); ctx.moveTo(x, 90); ctx.lineTo(x + (rng.next() - 0.5) * 8, 150 + rng.next() * 20); ctx.stroke(); }
         break;
+      case Species.Maple:
+        trunkRect(cx, 10, 112, 192, '#4f3a2b');
+        blob(cx, 80, 42, '#c8472e'); blob(cx - 20, 92, 28, '#d9622f'); blob(cx + 22, 88, 28, '#e08a2e'); blob(cx, 60, 28, '#e0a036', 6);
+        break;
+      case Species.Cypress:
+        trunkRect(cx, 6, 170, 192, '#4a3828');
+        for (let i = 0; i < 7; i++) blob(cx, 172 - i * 24, 18 - i * 1.6, i % 2 ? '#2e5b34' : '#35673b', 5);
+        blob(cx, 14, 7, '#3a6f40', 3);
+        break;
+      case Species.Blossom:
+        trunkRect(cx, 8, 120, 192, '#5a4034');
+        blob(cx, 92, 38, '#f2a9c4'); blob(cx - 18, 104, 26, '#eb8fb0'); blob(cx + 20, 100, 26, '#f7c6d9'); blob(cx, 72, 24, '#f9d7e3', 6);
+        break;
+      case Species.Fir:
+        trunkRect(cx, 7, 160, 192, '#4b3627');
+        ctx.fillStyle = '#28553a';
+        for (let t = 0; t < 7; t++) {
+          const y = 30 + t * 22, w = 14 + t * 9;
+          ctx.beginPath(); ctx.moveTo(cx, y - 22); ctx.lineTo(cx + w, y + 12); ctx.lineTo(cx - w, y + 12); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = t % 2 ? '#2f6242' : '#254d36';
+        }
+        break;
     }
     ctx.restore();
   }
@@ -695,7 +911,8 @@ function paintImpostorAtlas(): THREE.CanvasTexture {
   return tex;
 }
 
-export const COVER_TILES = 7;
+/** Ground-cover tiles: 0-3 grass kinds (meadow, dry, coast/arid, reed), 4-6 poppy/daisy/lupine, 7 fern, 8 tall grass, 9 cornflower, 10 buttercup. */
+export const COVER_TILES = 11;
 
 function paintGrassAtlas(): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
@@ -704,23 +921,42 @@ function paintGrassAtlas(): THREE.CanvasTexture {
   canvas.height = 64;
   const ctx = canvas.getContext('2d')!;
   const rng = new Rng(0x9a55);
-  const palettes = [['#6f9a3a', '#88b048'], ['#7ea24a', '#a7c25a'], ['#8f9a4a', '#b3ad5c'], ['#5f8a3a', '#7aa346'], ['#5f8f3a', '#7aa346'], ['#6a9440', '#86ad4c'], ['#5c8a3c', '#78a548']];
+  const palettes = [['#6f9a3a', '#88b048'], ['#7ea24a', '#a7c25a'], ['#8f9a4a', '#b3ad5c'], ['#5f8a3a', '#7aa346'], ['#5f8f3a', '#7aa346'], ['#6a9440', '#86ad4c'], ['#5c8a3c', '#78a548'],
+    ['#3f7a34', '#4f8f3e'], ['#8aa848', '#a8bf58'], ['#5f8f3a', '#7aa346'], ['#6a9440', '#86ad4c']];
   // Flower tiles: stalks first, then blossoms on top.
   const flowers: (null | { petals: string; center: string; count: number; spike?: boolean })[] = [null, null, null, null,
-    { petals: '#e6452f', center: '#2a1a12', count: 9 }, { petals: '#f7f3e6', center: '#f2c230', count: 10 }, { petals: '#7d5fc4', center: '#5b3fa8', count: 8, spike: true }];
+    { petals: '#e6452f', center: '#2a1a12', count: 9 }, { petals: '#f7f3e6', center: '#f2c230', count: 10 }, { petals: '#7d5fc4', center: '#5b3fa8', count: 8, spike: true },
+    null, null, { petals: '#4f6fd6', center: '#2c3f8f', count: 9 }, { petals: '#f4c530', center: '#e0891c', count: 10 }];
   for (let t = 0; t < tiles; t++) {
     ctx.save();
     ctx.translate(t * 64, 0);
     ctx.lineCap = 'round';
-    for (let i = 0; i < (flowers[t] ? 9 : 14); i++) {
-      ctx.strokeStyle = palettes[t][i % 2];
-      ctx.lineWidth = 2 + rng.next() * 2;
-      const x0 = 12 + rng.next() * 40;
-      const h = 22 + rng.next() * 36;
-      ctx.beginPath();
-      ctx.moveTo(x0, 64);
-      ctx.quadraticCurveTo(x0 + (rng.next() - 0.5) * 16, 64 - h * 0.6, x0 + (rng.next() - 0.5) * 30, 64 - h);
-      ctx.stroke();
+    if (t === 7) {
+      // Fern: arching fronds with leaflets along each side.
+      for (let i = 0; i < 6; i++) {
+        const x0 = 20 + rng.next() * 24, dir = rng.next() < 0.5 ? -1 : 1, len = 30 + rng.next() * 24;
+        const ex = x0 + dir * (14 + rng.next() * 18), ey = 64 - len;
+        ctx.strokeStyle = palettes[7][0]; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x0, 64); ctx.quadraticCurveTo(x0 + dir * 4, 64 - len * 0.55, ex, ey); ctx.stroke();
+        ctx.lineWidth = 1.6; ctx.strokeStyle = palettes[7][1];
+        for (let k = 1; k < 7; k++) {
+          const s = k / 7, px = x0 + (ex - x0) * s + dir * 4 * (1 - s) * s * 2, py = 64 + (ey - 64) * s, w = (1 - s) * 7 + 2;
+          ctx.beginPath(); ctx.moveTo(px - w, py + 2); ctx.lineTo(px + w, py - 2); ctx.stroke();
+        }
+      }
+    } else {
+      const tall = t === 8;
+      for (let i = 0; i < (flowers[t] ? 9 : tall ? 12 : 14); i++) {
+        ctx.strokeStyle = palettes[t][i % 2];
+        ctx.lineWidth = tall ? 1.6 + rng.next() * 1.4 : 2 + rng.next() * 2;
+        const x0 = 12 + rng.next() * 40;
+        const h = tall ? 40 + rng.next() * 22 : 22 + rng.next() * 36;
+        ctx.beginPath();
+        ctx.moveTo(x0, 64);
+        ctx.quadraticCurveTo(x0 + (rng.next() - 0.5) * 16, 64 - h * 0.6, x0 + (rng.next() - 0.5) * (tall ? 40 : 30), 64 - h);
+        ctx.stroke();
+        if (tall && i % 3 === 0) { ctx.fillStyle = '#c9b56a'; ctx.beginPath(); ctx.ellipse(x0 + (rng.next() - 0.5) * 10, 64 - h + 2, 2.2, 5, rng.next() * 0.6 - 0.3, 0, Math.PI * 2); ctx.fill(); } // seed head
+      }
     }
     const flower = flowers[t];
     if (flower) {
@@ -746,34 +982,35 @@ function paintGrassAtlas(): THREE.CanvasTexture {
 
 /** Two crossed quads, base at y=0, unit size, normals up (flat lighting). */
 /**
- * Shadow caster stand-in per species: a trunk and a crown blob of 30-40
- * triangles in the same local metres as the tree geometry. Full trees do not
- * cast shadows themselves (a 700-triangle crown per tree made the caster pass
- * a fifth of the frame on integrated GPUs); these draw into the shadow map
- * instead, and write nothing in the colour pass.
+ * Shadow casters: full trees do not cast shadows themselves (a 700-triangle crown per tree made the
+ * caster pass a fifth of the frame on integrated GPUs). Instead every chunk draws two instanced unit
+ * shapes into the shadow map, a blob (icosahedron) and a cone, scaled and lifted per species by this
+ * table: two draw calls per chunk instead of one per species and variant. They write nothing in the
+ * colour pass.
  */
-function shadowProxy(species: Species): THREE.BufferGeometry {
-  const parts: THREE.BufferGeometry[] = [];
-  // Merge needs every part indexed the same way; the icosahedron is non-indexed, so drop the others' indices too.
-  const add = (g: THREE.BufferGeometry) => { const flat = g.index ? g.toNonIndexed() : g; if (flat !== g) g.dispose(); parts.push(flat); };
-  const trunk = (r: number, h: number) => { const g = new THREE.CylinderGeometry(r * 0.8, r, h, 5, 1); g.translate(0, h / 2, 0); add(g); };
-  const blob = (r: number, y: number, sx = 1, sy = 1, sz = 1) => { const g = new THREE.IcosahedronGeometry(r, 0); g.scale(sx, sy, sz); g.translate(0, y, 0); add(g); };
-  const cone = (r: number, h: number, y: number) => { const g = new THREE.ConeGeometry(r, h, 6, 1); g.translate(0, y + h / 2, 0); add(g); };
-  switch (species) {
-    case Species.Oak: trunk(0.35, 4.5); blob(4.2, 7.6, 1, 0.9, 1); break;
-    case Species.Pine: trunk(0.3, 3); cone(3.2, 12, 3); break;
-    case Species.Birch: trunk(0.25, 4); blob(2.6, 7.4, 1, 1.25, 1); break;
-    case Species.Palm: trunk(0.3, 8); blob(3.3, 8.6, 1, 0.5, 1); break;
-    case Species.Cactus: trunk(0.5, 4.5); break;
-    case Species.Deadwood: trunk(0.3, 5); blob(1.6, 4.6); break;
-    case Species.Shrub: blob(1.4, 1.1, 1, 0.8, 1); break;
-    case Species.Willow: trunk(0.4, 3); blob(3.6, 5, 1, 0.85, 1); break;
-    default: blob(1.9, 1.4, 1.4, 0.9, 1.2); break;
-  }
-  for (const p of parts) p.deleteAttribute('uv');
-  const merged = mergeGeometries(parts, false)!;
-  for (const p of parts) p.dispose();
-  return merged;
+export type ShadowClass = 'blob' | 'cone';
+export interface ShadowCast { cls: ShadowClass; sx: number; sy: number; sz: number; y: number }
+export const SHADOW_CAST: ShadowCast[] = [
+  { cls: 'blob', sx: 4.2, sy: 3.8, sz: 4.2, y: 7.6 },    // oak
+  { cls: 'cone', sx: 3.2, sy: 12, sz: 3.2, y: 3 },       // pine
+  { cls: 'blob', sx: 2.6, sy: 3.25, sz: 2.6, y: 7.4 },   // birch
+  { cls: 'blob', sx: 3.3, sy: 1.65, sz: 3.3, y: 8.6 },   // palm
+  { cls: 'cone', sx: 0.6, sy: 4.5, sz: 0.6, y: 0 },      // cactus
+  { cls: 'blob', sx: 1.6, sy: 1.6, sz: 1.6, y: 4.6 },    // deadwood
+  { cls: 'blob', sx: 1.4, sy: 1.1, sz: 1.4, y: 1.1 },    // shrub
+  { cls: 'blob', sx: 3.6, sy: 3.05, sz: 3.6, y: 5 },     // willow
+  { cls: 'blob', sx: 2.65, sy: 1.7, sz: 2.3, y: 1.4 },   // boulder
+  { cls: 'blob', sx: 3.6, sy: 3.25, sz: 3.6, y: 7.2 },   // maple
+  { cls: 'blob', sx: 1.3, sy: 5.5, sz: 1.3, y: 7.5 },    // cypress
+  { cls: 'blob', sx: 2.8, sy: 2.25, sz: 2.8, y: 5.4 },   // blossom
+  { cls: 'cone', sx: 2.6, sy: 14, sz: 2.6, y: 2 },       // fir
+];
+function shadowUnit(cls: ShadowClass): THREE.BufferGeometry {
+  if (cls === 'blob') { const g = new THREE.IcosahedronGeometry(1, 0); g.deleteAttribute('uv'); return g; }
+  const g = new THREE.ConeGeometry(1, 1, 6, 1);
+  g.translate(0, 0.5, 0);
+  g.deleteAttribute('uv');
+  return g;
 }
 
 function crossQuads(): THREE.BufferGeometry {
@@ -803,7 +1040,7 @@ export class VegetationLibrary {
   readonly coverMaterialFading: BillboardMaterial;
   /** Colour-pass material of the shadow proxies: writes nothing; the shadow pass uses its own depth material. */
   readonly shadowMaterial = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
-  private proxies: THREE.BufferGeometry[] = [];
+  private shadowUnits: Partial<Record<ShadowClass, THREE.BufferGeometry>> = {};
   private twins = new Map<THREE.Material, { fading: THREE.Material; settled: THREE.Material }>();
   private geometries: THREE.BufferGeometry[][] = [];
   private impostorTexture: THREE.Texture;
@@ -813,7 +1050,7 @@ export class VegetationLibrary {
     this.material = new VegetationMaterial();
     const builders = BUILDERS;
     // Geometry variants per species (shader adds per-instance variation on top).
-    const variantCounts = [2, 2, 1, 1, 1, 1, 1, 1, 2];
+    const variantCounts = [2, 2, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1];
     for (let s = 0; s < SPECIES_COUNT; s++) {
       this.geometries[s] = [];
       for (let v = 0; v < variantCounts[s]; v++) this.geometries[s].push(builders[s](hash2(s, v, 0x7e9)));
@@ -836,9 +1073,9 @@ export class VegetationLibrary {
   fadingTwin(m: THREE.Material): THREE.Material { return this.twins.get(m)?.fading ?? m; }
   settledTwin(m: THREE.Material): THREE.Material { return this.twins.get(m)?.settled ?? m; }
 
-  /** Low-poly shadow caster geometry for a species (built on first use). */
-  shadowProxy(species: Species): THREE.BufferGeometry {
-    return (this.proxies[species] ??= shadowProxy(species));
+  /** Unit shadow caster (blob or cone), built on first use; SHADOW_CAST gives the per-species placement. */
+  shadowUnit(cls: ShadowClass): THREE.BufferGeometry {
+    return (this.shadowUnits[cls] ??= shadowUnit(cls));
   }
 
   variants(species: Species): number {
@@ -886,7 +1123,7 @@ export class VegetationLibrary {
 
   dispose(): void {
     for (const list of this.geometries) for (const g of list) g.dispose();
-    for (const p of this.proxies) p?.dispose();
+    for (const g of Object.values(this.shadowUnits)) g?.dispose();
     this.shadowMaterial.dispose();
     this.material.dispose();
     this.materialFading.dispose();

@@ -12,7 +12,7 @@ import { WorkerPool } from '../workers/WorkerPool';
 import { SPECIES_COLLIDER } from './biomes';
 import { chunkKey, WATER_SEGMENTS, COVER_STRIDE, sampleHeightGrid, TREE_STRIDE } from './chunkMesh';
 import { hash2 } from './noise';
-import { IMPOSTOR_SIZE, type VegetationLibrary } from './Vegetation';
+import { IMPOSTOR_SIZE, SHADOW_CAST, coverTint, speciesTint, type ShadowClass, type VegetationLibrary } from './Vegetation';
 import { createTerrainSample, type WorldGen } from './WorldGen';
 import type { WaterMaterial } from '../atmosphere/WaterMaterial';
 import { TerrainMaterial } from './TerrainMaterial';
@@ -602,16 +602,25 @@ export class ChunkManager {
         const k = key(trees[o + 3], variantOf(o));
         counts.set(k, (counts.get(k) ?? 0) + 1);
       }
-      const meshes = new Map<number, { im: THREE.InstancedMesh; shadow: THREE.InstancedMesh; rand: Float32Array; cursor: number }>();
+      const meshes = new Map<number, { im: THREE.InstancedMesh; rand: Float32Array; tint: Float32Array; cursor: number }>();
       for (const [k, c] of counts) {
         const s = Math.floor(k / 8), v = k % 8;
         const im = new THREE.InstancedMesh(this.veg.geometry(s, v), this.veg.materialFading, c);
         im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-        im.castShadow = false; // the proxy below casts instead
-        const shadow = new THREE.InstancedMesh(shareGeometry(this.veg.shadowProxy(s)), this.veg.shadowMaterial, c);
+        im.castShadow = false; // the unit casters below cast instead
+        meshes.set(k, { im, rand: new Float32Array(c), tint: new Float32Array(c * 3), cursor: 0 });
+      }
+      // Shadow casters: one instanced blob and one instanced cone per chunk (two draws in the caster
+      // pass instead of one per species and variant), scaled and lifted per species.
+      const castCount: Record<ShadowClass, number> = { blob: 0, cone: 0 };
+      for (let i = 0; i < n; i++) castCount[SHADOW_CAST[trees[i * TREE_STRIDE + 3]].cls]++;
+      const casters: Partial<Record<ShadowClass, { mesh: THREE.InstancedMesh; cursor: number }>> = {};
+      for (const cls of ['blob', 'cone'] as const) {
+        if (castCount[cls] === 0) continue;
+        const shadow = new THREE.InstancedMesh(shareGeometry(this.veg.shadowUnit(cls)), this.veg.shadowMaterial, castCount[cls]);
         shadow.instanceMatrix.setUsage(THREE.StaticDrawUsage);
         shadow.castShadow = this.shadows; shadow.visible = this.shadows; shadow.receiveShadow = false;
-        meshes.set(k, { im, shadow, rand: new Float32Array(c), cursor: 0 });
+        casters[cls] = { mesh: shadow, cursor: 0 };
       }
       for (let i = 0; i < n; i++) {
         const o = i * TREE_STRIDE;
@@ -623,17 +632,23 @@ export class ChunkManager {
         _s.set(sc, sc, sc);
         _m.compose(_p, _q, _s);
         entry.im.setMatrixAt(entry.cursor, _m);
-        entry.shadow.setMatrixAt(entry.cursor, _m);
+        const cast = SHADOW_CAST[s], caster = casters[cast.cls]!;
+        _p.y += cast.y * sc; _s.set(cast.sx * sc, cast.sy * sc, cast.sz * sc);
+        caster.mesh.setMatrixAt(caster.cursor++, _m.compose(_p, _q, _s));
         entry.rand[entry.cursor] = ChunkManager.treeRand(trees[o], trees[o + 2]);
+        speciesTint(s, trees[o], trees[o + 2], entry.tint, entry.cursor * 3);
         entry.cursor++;
       }
-      for (const { im, shadow, rand } of meshes.values()) {
-        // Per-instance random for crown displacement/wind phase. The geometry
-        // is shared, so the attribute is attached to a shallow per-mesh copy.
+      for (const { im, rand, tint } of meshes.values()) {
+        // Per-instance random for crown displacement/wind phase and the crown tint. The geometry
+        // is shared, so the attributes are attached to a shallow per-mesh copy.
         const g = shareGeometry(im.geometry);
         g.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+        g.setAttribute('aTint', new THREE.InstancedBufferAttribute(tint, 3));
         im.geometry = g;
         this.placeInstanced(rec, im, rec.treeMeshes);
+      }
+      for (const { mesh: shadow } of Object.values(casters)) {
         shadow.instanceMatrix.needsUpdate = true;
         shadow.computeBoundingSphere();
         shadow.position.set(ox, 0, oz);
@@ -647,7 +662,7 @@ export class ChunkManager {
       // Impostors: crossed billboards, one tile per species.
       const im = new THREE.InstancedMesh(shareGeometry(this.veg.impostorGeometry), this.veg.impostorMaterialFading, n);
       im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-      const tile = new Float32Array(n), rand = new Float32Array(n);
+      const tile = new Float32Array(n), rand = new Float32Array(n), tint = new Float32Array(n * 3);
       for (let i = 0; i < n; i++) {
         const o = i * TREE_STRIDE;
         const s = trees[o + 3];
@@ -660,9 +675,11 @@ export class ChunkManager {
         im.setMatrixAt(i, _m);
         tile[i] = s;
         rand[i] = hash2(Math.round(trees[o]), Math.round(trees[o + 2]), 5) / 4294967296;
+        speciesTint(s, trees[o], trees[o + 2], tint, i * 3);
       }
       im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
       im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+      im.geometry.setAttribute('aTint', new THREE.InstancedBufferAttribute(tint, 3));
       this.placeInstanced(rec, im, rec.treeMeshes);
     }
   }
@@ -672,7 +689,7 @@ export class ChunkManager {
     const cn = cover.length / COVER_STRIDE, ox = rec.cx * CHUNK_SIZE, oz = rec.cz * CHUNK_SIZE;
     const im = new THREE.InstancedMesh(shareGeometry(this.veg.coverGeometry), this.veg.coverMaterialFading, cn);
     im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-    const tile = new Float32Array(cn), rand = new Float32Array(cn);
+    const tile = new Float32Array(cn), rand = new Float32Array(cn), tint = new Float32Array(cn * 3);
     for (let i = 0; i < cn; i++) {
       const o = i * COVER_STRIDE;
       const sc = cover[o + 3];
@@ -683,9 +700,11 @@ export class ChunkManager {
       im.setMatrixAt(i, _m);
       tile[i] = cover[o + 5];
       rand[i] = hash2(Math.round(cover[o] * 2), Math.round(cover[o + 2] * 2), 17) / 4294967296;
+      coverTint(cover[o + 5], cover[o], cover[o + 2], tint, i * 3);
     }
     im.geometry.setAttribute('aTile', new THREE.InstancedBufferAttribute(tile, 1));
     im.geometry.setAttribute('aRand', new THREE.InstancedBufferAttribute(rand, 1));
+    im.geometry.setAttribute('aTint', new THREE.InstancedBufferAttribute(tint, 3));
     this.placeInstanced(rec, im, rec.coverMeshes);
   }
 

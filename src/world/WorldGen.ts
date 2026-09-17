@@ -456,6 +456,14 @@ export class WorldGen {
     const v = this.valleyAt(x, z, this.valleyScratch).mask;
     return smoothstep(0.12 - 0.1 * v, 0.5 - 0.2 * v, this.nVeg.noise(x / 95 + 11.3, z / 95 - 7.1));
   }
+  /**
+   * 0..1 value whose fifth (floor(v * 5)) is the dominant flower of the zone a point lies in: hashed
+   * 170 m cells with warped borders, so meadows read as fields of one colour with organic edges.
+   */
+  flowerKind(x: number, z: number): number {
+    const wx = x + 70 * this.nVeg.noise(x / 210 + 41, z / 210 + 17), wz = z + 70 * this.nVeg.noise(x / 210 - 23, z / 210 + 61);
+    return ((hash2(Math.floor(wx / 170), Math.floor(wz / 170), 9021) % 5) + 0.5) / 5;
+  }
   private valleyScratch: ValleySample = { mask: 0, t: 0, dist: 0 };
 
   slopeAt(x: number, z: number, d = 6): number {
@@ -494,10 +502,13 @@ export class WorldGen {
       return;
     }
 
+    // Climate shifts every green: dry ground goes olive-yellow, moist ground deeper and bluer, and
+    // warm regions a little warmer, so one biome does not read as one flat colour across the map.
+    const dry = clamp(1 - s.moist, 0, 1) - 0.5, warm = s.temp - 0.5;
     if (w[Biome.Temperate] > 0) {
       // Restrained greens: woodland floor to dry meadow.
       const m = smoothstep(0.35, 0.75, n1);
-      const tr = lerp(0.32, 0.52, m), tg = lerp(0.45, 0.54, m), tb = lerp(0.21, 0.30, m);
+      const tr = lerp(0.32, 0.52, m) + 0.10 * dry + 0.03 * warm, tg = lerp(0.45, 0.54, m) - 0.03 * dry, tb = lerp(0.21, 0.30, m) - 0.07 * dry - 0.03 * warm;
       r += w[Biome.Temperate] * tr; g += w[Biome.Temperate] * tg; b += w[Biome.Temperate] * tb;
     }
     if (w[Biome.Alpine] > 0) {
@@ -532,17 +543,22 @@ export class WorldGen {
       r += w[Biome.Wetland] * wr; g += w[Biome.Wetland] * wg; b += w[Biome.Wetland] * wb;
     }
     if (w[Biome.Upland] > 0) {
-      // Wildflower patches from a high-frequency field.
+      // Meadow green with heather patches (purple-brown, ~400 m) and a soft wildflower blush that
+      // follows the flower zones. The blush is gentle and wide so it never shows as hard polygons
+      // at vertex resolution; the tufts of the ground cover carry the actual flowers.
+      let ur = 0.44 + 0.05 * dry, ug = 0.56 - 0.02 * dry, ub = 0.28 - 0.05 * dry;
+      const heath = smoothstep(0.6, 0.85, this.nVeg.noise(x / 420 + 70, z / 420 + 70) * 0.5 + 0.5);
+      ur = lerp(ur, 0.50, 0.45 * heath); ug = lerp(ug, 0.40, 0.45 * heath); ub = lerp(ub, 0.36, 0.45 * heath);
       const f = this.nVeg.noise(x / 38, z / 38);
-      const f2 = this.nVeg.noise(x / 9 + 50, z / 9 + 50);
-      let ur = 0.44, ug = 0.56, ub = 0.28;
-      if (f > 0.25 && f2 > 0.1) {
-        const pick = this.nVeg.noise(x / 160 + 300, z / 160 + 300);
-        if (pick > 0.2) { ur = 0.86; ug = 0.48; ub = 0.62; }
-        else if (pick < -0.2) { ur = 0.62; ug = 0.48; ub = 0.84; }
-        else { ur = 0.9; ug = 0.82; ub = 0.36; }
-        const k = smoothstep(0.25, 0.45, f);
-        ur = lerp(0.44, ur, k); ug = lerp(0.56, ug, k); ub = lerp(0.28, ub, k);
+      const k = smoothstep(0.1, 0.6, f) * (1 - heath) * 0.35;
+      if (k > 0.001) {
+        const pick = this.flowerKind(x, z);
+        let fr = 0.9, fg = 0.82, fb = 0.36;
+        if (pick < 0.2) { fr = 0.86; fg = 0.44; fb = 0.42; }
+        else if (pick < 0.4) { fr = 0.92; fg = 0.9; fb = 0.78; }
+        else if (pick < 0.6) { fr = 0.62; fg = 0.48; fb = 0.84; }
+        else if (pick < 0.8) { fr = 0.5; fg = 0.55; fb = 0.86; }
+        ur = lerp(ur, fr, k); ug = lerp(ug, fg, k); ub = lerp(ub, fb, k);
       }
       r += w[Biome.Upland] * ur; g += w[Biome.Upland] * ug; b += w[Biome.Upland] * ub;
     }
@@ -591,22 +607,22 @@ export class WorldGen {
     let species = Species.Oak;
     switch (s.biome) {
       case Biome.Temperate:
-        species = u < 0.56 ? Species.Oak : u < 0.82 ? Species.Pine : u < 0.96 ? Species.Birch : Species.Rock;
+        species = u < 0.42 ? Species.Oak : u < 0.62 ? Species.Pine : u < 0.72 ? Species.Birch : u < 0.83 ? Species.Maple : u < 0.90 ? Species.Blossom : u < 0.96 ? (h > 220 ? Species.Fir : Species.Pine) : Species.Rock;
         break;
       case Biome.Alpine:
-        species = u < 0.66 ? Species.Pine : u < 0.76 ? Species.Birch : Species.Rock;
+        species = u < 0.40 ? Species.Pine : u < 0.72 ? Species.Fir : u < 0.78 ? Species.Birch : Species.Rock;
         break;
       case Biome.Coast:
-        species = u < 0.45 ? Species.Palm : Species.Shrub;
+        species = u < 0.40 ? Species.Palm : u < 0.50 ? Species.Cypress : Species.Shrub;
         break;
       case Biome.Arid:
         species = u < 0.3 ? Species.Cactus : u < 0.5 ? Species.Deadwood : u < 0.74 ? Species.Shrub : Species.Rock;
         break;
       case Biome.Wetland:
-        species = u < 0.55 ? Species.Willow : Species.Shrub;
+        species = u < 0.48 ? Species.Willow : u < 0.54 ? Species.Blossom : Species.Shrub;
         break;
       case Biome.Upland:
-        species = u < 0.4 ? Species.Birch : u < 0.66 ? Species.Shrub : u < 0.86 ? Species.Oak : Species.Rock;
+        species = u < 0.30 ? Species.Birch : u < 0.52 ? Species.Shrub : u < 0.64 ? Species.Oak : u < 0.76 ? Species.Maple : u < 0.81 ? Species.Blossom : Species.Rock;
         break;
       default:
         density = 0;

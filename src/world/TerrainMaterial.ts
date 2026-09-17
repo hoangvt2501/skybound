@@ -127,17 +127,24 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
             float n3 = tNoise(vWPos.xz * 0.012 + 9.7);
             // Mottle contrast is lower than with the old sine hash: at large coordinates that hash lost
             // precision and clustered its values, so the baked noise reads stronger for the same weight.
-            col *= 1.0 + (n1 - 0.5) * 0.16 * nearFade + (n2 - 0.5) * 0.06 * midFade + (n3 - 0.5) * 0.035;
+            col *= 1.0 + (n1 - 0.5) * 0.14 * nearFade + (n2 - 0.5) * 0.045 * midFade + (n3 - 0.5) * 0.03;
             // Soil: as the ground steepens the grass thins to a dusty brown before bare rock takes over,
             // so grass, soil and rock blend over a wide band instead of meeting at one edge.
             float soil = smoothstep(0.07, 0.30, steep + (n2 - 0.5) * 0.08) * (1.0 - vAux.w) * (1.0 - vAux.x);
             col = mix(col, mix(col, vec3(0.19, 0.155, 0.115), 0.55), soil * 0.75);
+            // Scree: loose rock speckles in the soil band, near the camera only.
+            float scree = smoothstep(0.58, 0.78, n1) * soil * nearFade;
+            col = mix(col, vec3(0.26, 0.24, 0.21), scree * 0.45);
             // Rock on steep faces, using the interpolated normal. The strata and
             // crack work only runs where rock is actually visible.
             float rockMask = smoothstep(0.20, 0.52, steep + vAux.y * 0.16 + (n2 - 0.5) * 0.1);
             if (rockMask > 0.003) {
-              vec3 rockA = vec3(0.155, 0.135, 0.115);
-              vec3 rockB = vec3(0.30, 0.27, 0.235);
+              // Rock colour drifts by region (~1.2 km): grey, ochre or dark basalt, so ranges differ.
+              // (Fetched inside the branch: on grass pixels, the bulk of the frame, it costs nothing.)
+              float rockHue = tNoise(vWPos.xz * 0.0008 + 4.2);
+              float basalt = smoothstep(0.35, 0.15, rockHue), ochre = smoothstep(0.6, 0.85, rockHue);
+              vec3 rockA = mix(mix(vec3(0.155, 0.135, 0.115), vec3(0.105, 0.105, 0.115), basalt), vec3(0.21, 0.165, 0.105), ochre);
+              vec3 rockB = mix(mix(vec3(0.30, 0.27, 0.235), vec3(0.23, 0.225, 0.235), basalt), vec3(0.40, 0.32, 0.215), ochre);
               vec3 rockCol = mix(rockA, rockB, 0.25 + 0.5 * n3);
               // Strata: gently warped bands, broken by grain so they never read as contour lines.
               float strata = 0.5 + 0.5 * sin(vWPos.y * 0.3 + (n2 - 0.5) * 6.0 + (n3 - 0.5) * 3.0 + vWPos.x * 0.002);
@@ -174,7 +181,7 @@ export class TerrainMaterial extends THREE.MeshLambertMaterial {
         )
         .replace('#include <fog_fragment>', `${AERIAL_FRAGMENT}\n#include <fog_fragment>`);
     };
-    this.customProgramCacheKey = () => 'skybound-terrain-v7';
+    this.customProgramCacheKey = () => 'skybound-terrain-v9';
   }
 
   /** A material instance for one morphing chunk: same program and shared uniforms, its own `uMorph`. */

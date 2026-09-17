@@ -77,7 +77,8 @@ export function treePerch(t: TreeLike): Perch | null {
   const rock = t.species === Species.Rock;
   if (rock) { if (scale < LANDING.rockMinScale) return null; }
   else {
-    if (t.species !== Species.Oak && t.species !== Species.Pine && t.species !== Species.Willow && t.species !== Species.Birch) return null;
+    const s = t.species;
+    if (s !== Species.Oak && s !== Species.Pine && s !== Species.Willow && s !== Species.Birch && s !== Species.Maple && s !== Species.Fir && s !== Species.Cypress && s !== Species.Blossom) return null;
     if (scale < LANDING.treeMinScale) return null;
     if (hash2(Math.round(t.x), Math.round(t.z), 91) / 4294967296 > LANDING.treeShare) return null;
   }
