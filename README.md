@@ -20,7 +20,7 @@ Other commands:
 | Command | What it does |
 | --- | --- |
 | `npm run build` | Production build into `dist/` |
-| `npm run preview` | Serve `dist/` at http://127.0.0.1:4173 |
+| `npm run preview` | Serve `dist/` at `http://127.0.0.1:4173` |
 | `npm run typecheck` | `tsc --noEmit` over the whole project |
 | `npm run test` | Vitest unit tests (world determinism, seams, map projection, flight, saves, origin) |
 | `npm run test:e2e` | Playwright real-browser smoke tests (builds and serves `dist/` first) |
@@ -168,7 +168,7 @@ The app uses module workers (`type: 'module'`), which every current browser supp
 
 ## Verification
 
-Every change is checked three ways before it is deployed: `npm run typecheck` and `npm test` (Vitest: world generation determinism, chunk edges, map transforms, flight model, persistence and migration, floating origin, settings dialog, bird profiles, ambient life and its reactions, scenery rules, water contact, thermals and ridge lift, terrain geomorph data) run in the GitHub Pages workflow before every build; `npm run test:e2e` (Playwright: desktop smoke and interaction flows, Pixel 7 touch emulation) and real-GPU benchmarks on a fixed autopilot route are run locally on an integrated Intel GPU. Frame times, attribution runs and screenshots from those checks live in the commit messages rather than in the repository.
+Every change is checked three ways before it is deployed: `npm run typecheck` and `npm test` (Vitest: world generation determinism, chunk edges, map transforms, flight model, persistence and migration, floating origin, settings dialog, bird profiles, ambient life and its reactions, scenery rules, water contact, thermals and ridge lift, terrain geomorph data) run in the CI workflow on every pull request and in the GitHub Pages workflow before every build; `npm run test:e2e` (Playwright: desktop smoke and interaction flows, Pixel 7 touch emulation, landing on a perch) is a manual job on the CI workflow and is run locally, as are real-GPU benchmarks on a fixed autopilot route on an integrated Intel GPU. Frame times, attribution runs and screenshots from those checks live in the commit messages rather than in the repository. [CONTRIBUTING.md](CONTRIBUTING.md) says how a change is expected to be measured; [CHANGELOG.md](CHANGELOG.md) lists the passes that landed.
 
 Performance note: the frame is GPU bound on integrated GPUs (measured with `EXT_disjoint_timer_query_webgl2`: terrain, trees and the shadow pass are the three big items). Adaptive resolution (on by default) counts missed display refreshes and settles at the highest render scale that keeps every frame inside one refresh. The scene renders into a multisampled target of the scaled size and is upsampled onto the full-size canvas, so a scale change resizes that target (about a millisecond) instead of the browser's swap chain (20-40 ms), and the controller can step in increments of 0.05 without hitching. The HUD is HTML and stays sharp at every scale. Turning adaptive resolution off pins the scale at the preset cap.
 
