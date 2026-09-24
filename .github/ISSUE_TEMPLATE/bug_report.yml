@@ -1,0 +1,46 @@
+name: Bug report
+description: Something looks wrong, behaves wrong or runs slowly
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the live site (or `npm run dev`)
+        2. Start a flight with seed 1207
+        3. Fly toward the mist valley and land on the watchtower
+        4. ...
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where in the world
+      description: Seed and position if you know them (the developer overlay, F3, shows x/z), or the landmark name.
+      placeholder: "seed 1207, near Stonecrest Watchtower (-4595, 3231)"
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and GPU
+      placeholder: "Chrome 130 on Windows 11, Intel UHD 770"
+    validations:
+      required: true
+  - type: dropdown
+    id: quality
+    attributes:
+      label: Quality preset
+      options: [low, medium, high]
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshot, console errors, frame rate
+      description: A photo-mode capture (P, then Enter) or a screenshot helps; paste console errors as text.

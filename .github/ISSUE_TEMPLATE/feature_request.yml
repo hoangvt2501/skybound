@@ -1,0 +1,27 @@
+name: Feature request
+description: Something you would like to see, hear or do in the world
+title: "[Idea] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What it is and where in the world it belongs.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it makes the flight better
+      description: A place worth stopping at, a new thing to do, a look that reads better...
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [world and terrain, vegetation and wildlife, bird and flight, camera and controls, sky, weather and water, sound and music, UI and map, performance]
+  - type: textarea
+    id: refs
+    attributes:
+      label: References
+      description: Sketches, screenshots from other games, links.
