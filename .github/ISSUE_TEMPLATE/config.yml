@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Play the current build
+    url: https://hoangvt2501.github.io/skybound/
+    about: The main branch, deployed by the Pages workflow on every push.
